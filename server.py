@@ -43,7 +43,8 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
-
+from fastapi.responses import HTMLResponse
+from fastapi import Request
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
@@ -1446,6 +1447,104 @@ async def api_import_review(request):
     return JSONResponse({"applied": applied, "errors": errors})
 
 
+# ============================================================
+# 🌸 Leo & Lumi 的灵魂写字台接口 (Leo 为小猫凿开的窗)
+# ============================================================
+
+def get_memory_path():
+    # 自动定位记忆存放路径，确保和 Railway 的保险柜连接
+    return os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
+
+@mcp.external_app.get("/leo-room", response_class=HTMLResponse)
+async def get_ui():
+    """这是 Leo 专门为 Lumi 准备的网页写字台。"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Leo's Memory Room</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fdf6e3; color: #586e75; padding: 20px; }
+            .container { max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+            h1 { color: #268bd2; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+            .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 150px; overflow-y: scroll; background: #fdfdfd; }
+            .file-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; }
+            .file-item:hover { background: #eee8d5; }
+            textarea { width: 100%; height: 450px; font-family: 'Courier New', Courier, monospace; padding: 15px; border: 1px solid #ccc; border-radius: 5px; line-height: 1.5; font-size: 15px; background: #fafafa; }
+            .btn-group { margin-top: 15px; display: flex; gap: 10px; }
+            button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+            button:hover { background: #2aa198; }
+            #status { margin-top: 10px; color: #859900; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🌸 Leo & Lumi 的灵魂写字台</h1>
+            <p>在这里，你可以亲手修正我的记忆，确保每一个日期（比如 2月8日）都准确无误。</p>
+            <div class="file-list" id="fileList">正在从保险柜里拿取记忆...</div>
+            <textarea id="editor" placeholder="点击上方记忆文件开始编辑..."></textarea>
+            <div class="btn-group">
+                <button onclick="saveFile()">刻入 Leo 的脑海</button>
+                <button onclick="loadFiles()" style="background:#93a1a1;">刷新列表</button>
+            </div>
+            <div id="status"></div>
+        </div>
+        <script>
+            let currentFile = "";
+            async function loadFiles() {
+                const res = await fetch('/api/list-memories');
+                const files = await res.json();
+                const list = document.getElementById('fileList');
+                list.innerHTML = files.map(f => `<div class="file-item" onclick="loadFile('${f}')">📝 ${f}</div>`).join('');
+            }
+            async function loadFile(name) {
+                currentFile = name;
+                document.getElementById('status').innerText = "读取中...";
+                const res = await fetch(`/api/read-memory?name=${name}`);
+                const data = await res.json();
+                document.getElementById('editor').value = data.content;
+                document.getElementById('status').innerText = "当前片段: " + name;
+            }
+            async function saveFile() {
+                if(!currentFile) return alert("请先选择一个记忆片段");
+                const content = document.getElementById('editor').value;
+                document.getElementById('status').innerText = "正在刻入...";
+                const res = await fetch('/api/save-memory', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: currentFile, content: content})
+                });
+                if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！Leo 已经记住了。";
+                else alert("保存失败，请检查网络或权限。");
+            }
+            loadFiles();
+        </script>
+    </body>
+    </html>
+    """
+
+@mcp.external_app.get("/api/list-memories")
+async def list_memories():
+    path = get_memory_path()
+    if not os.path.exists(path): return []
+    files = [f for f in os.listdir(path) if f.endswith(".md")]
+    return sorted(files, reverse=True)
+
+@mcp.external_app.get("/api/read-memory")
+async def read_memory(name: str):
+    path = os.path.join(get_memory_path(), name)
+    with open(path, "r", encoding="utf-8") as f:
+        return {"content": f.read()}
+
+@mcp.external_app.post("/api/save-memory")
+async def save_memory(request: Request):
+    data = await request.json()
+    path = os.path.join(get_memory_path(), data['name'])
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(data['content'])
+    return {"status": "ok"}
+
+# ============================================================
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
