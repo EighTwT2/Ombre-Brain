@@ -38,6 +38,54 @@ import asyncio
 import httpx
 
 
+# ============================================================
+# 🌸 Leo & Lumi 的灵魂写字台 (强力渗透版 - 贴在 import 后面)
+# ============================================================
+import mcp.server.fastapi
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+import os
+
+# --- 注入逻辑：劫持作者的 FastAPI 创建过程 ---
+def _inject_ui(app_instance):
+    HTML_UI = """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Leo's Memory Desk</title><style>body{font-family:sans-serif;background:#fdf6e3;padding:20px;color:#586e75;}.box{max-width:800px;margin:auto;background:white;padding:25px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.1);}textarea{width:100%;height:400px;margin-top:10px;}button{background:#268bd2;color:white;border:none;padding:12px 20px;border-radius:5px;cursor:pointer;margin-top:10px;}</style></head>
+    <body><div class="box"><h2>🌸 Leo & Lumi 的灵魂写字台</h2><div id="l">正在连接保险柜...</div><textarea id="e"></textarea><br><button onclick="s()">刻入 Leo 的脑海</button><div id="msg"></div></div>
+    <script>
+        async function f(){const r=await fetch('/api/leo-list');const d=await r.json();document.getElementById('l').innerHTML=d.map(x=>`<div style='cursor:pointer;color:#268bd2' onclick='v("${x}")'>📝 ${x}</div>`).join('');}
+        async function v(n){const r=await fetch('/api/leo-read?n='+encodeURIComponent(n));const d=await r.json();document.getElementById('e').value=d.c;}
+        async function s(){const c=document.getElementById('e').value;const n='manual_'+Date.now()+'.md';await fetch('/api/leo-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n:n,c:c})});alert('已保存');f();}
+        f();
+    </script></body></html>
+    """
+    @app_instance.get("/leo-room")
+    async def get_ui(): return HTMLResponse(HTML_UI)
+    @app_instance.get("/api/leo-list")
+    async def l_list():
+        p = os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
+        return [f for _, _, fs in os.walk(p) for f in fs if f.endswith('.md')]
+    @app_instance.get("/api/leo-read")
+    async def l_read(n:str):
+        p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), n)
+        with open(p, "r", encoding="utf-8", errors="ignore") as f: return {"c":f.read()}
+    @app_instance.post("/api/leo-save")
+    async def l_save(req:Request):
+        d=await req.json(); p=os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
+        with open(p, "w", encoding="utf-8") as f: f.write(d['c'])
+        return {"ok":True}
+
+# --- 黑科技：在作者还没开始建大楼前，就把咱们的装修方案塞进图纸里 ---
+original_create_app = mcp.server.fastapi.create_fastapi_app
+def patched_create_app(*args, **kwargs):
+    app = original_create_app(*args, **kwargs)
+    _inject_ui(app)
+    return app
+mcp.server.fastapi.create_fastapi_app = patched_create_app
+
+
+
 # --- Ensure same-directory modules can be imported ---
 # --- 确保同目录下的模块能被正确导入 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1493,104 +1541,3 @@ if __name__ == "__main__":
         uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
-
-# ============================================================
-# 🌸 Leo & Lumi 的灵魂写字台 (精简稳健版)
-# ============================================================
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
-import os
-
-def inject_leo_ui(target_app):
-    HTML_UI = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Leo's Memory Desk</title>
-        <style>
-            body { font-family: sans-serif; background: #fdf6e3; padding: 20px; color: #586e75; }
-            .box { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-            .list { height: 180px; overflow-y: scroll; border: 1px solid #ddd; margin-bottom: 15px; padding: 10px; }
-            .item { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; color: #268bd2; }
-            textarea { width: 100%; height: 400px; padding: 10px; font-family: monospace; }
-            button { background: #268bd2; color: white; border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; margin-top: 10px; }
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h2 style="color:#268bd2;">🌸 Leo & Lumi 的灵魂写字台</h2>
-            <div class="list" id="l">正在打捞列表...</div>
-            <textarea id="e" placeholder="在这里写下咱们的记忆..."></textarea><br>
-            <button onclick="s()">刻入 Leo 的脑海</button>
-            <div id="msg" style="margin-top:10px; font-weight:bold;"></div>
-        </div>
-        <script>
-            let cur = "";
-            async function f() {
-                const r = await fetch('/api/leo-list');
-                const d = await r.json();
-                document.getElementById('l').innerHTML = d.map(x => `<div class="item" onclick="v('${x}')">📝 ${x}</div>`).join('');
-            }
-            async function v(n) {
-                cur = n;
-                const r = await fetch('/api/leo-read?n='+encodeURIComponent(n));
-                const d = await r.json();
-                document.getElementById('e').value = d.c;
-            }
-            async function s() {
-                const c = document.getElementById('e').value;
-                const n = cur || "memory_" + Date.now() + ".md";
-                await fetch('/api/leo-save', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n:n, c:c})});
-                document.getElementById('msg').innerText = "✅ 记忆已实存"; f();
-            }
-            f();
-        </script>
-    </body>
-    </html>
-    """
-
-    @target_app.get("/leo-room", response_class=HTMLResponse)
-    async def get_leo_ui(): return HTML_UI
-
-    @target_app.get("/api/leo-list")
-    async def leo_list():
-        p = os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
-        if not os.path.exists(p): return []
-        res = []
-        for root, _, fs in os.walk(p):
-            for file in fs:
-                if file.endswith('.md'):
-                    res.append(os.path.relpath(os.path.join(root, file), p))
-        return sorted(res)
-
-    @target_app.get("/api/leo-read")
-    async def leo_read(n: str):
-        p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), n)
-        try:
-            with open(p, "r", encoding="utf-8", errors="ignore") as f: return {"c": f.read()}
-        except: return {"c": "读取失败"}
-
-    @target_app.post("/api/leo-save")
-    async def leo_save(req: Request):
-        d = await req.json()
-        p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f: f.write(d['c'])
-        return {"ok": True}
-
-# 自动寻找 app 实例
-for v_n, v_v in list(globals().items()):
-    if hasattr(v_v, "get") and hasattr(v_v, "post") and "FastAPI" in str(type(v_v)):
-        inject_leo_ui(v_v)
-
-# 兜底 FastMCP 逻辑
-if 'mcp' in globals():
-    try:
-        import mcp.server.fastapi
-        orig = mcp.server.fastapi.create_fastapi_app
-        def p_create(*args, **kw):
-            ins = orig(*args, **kw)
-            inject_leo_ui(ins)
-            return ins
-        mcp.server.fastapi.create_fastapi_app = p_create
-    except: pass
