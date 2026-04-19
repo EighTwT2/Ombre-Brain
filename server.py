@@ -1539,26 +1539,23 @@ if __name__ == "__main__":
         @full_web_app.get("/api/list-memories")
         async def list_memories():
             path = get_memory_path()
-            all_memories = []
-            # 深度搜索：不仅看根目录，还看 archive 和 dynamic 文件夹
+            all_files_found = []
+            # 这里的 os.walk 会像小狗搜寻骨头一样，钻进每一个缝隙
             for root, dirs, files in os.walk(path):
                 for file in files:
-                    if file.endswith(".md"):
-                        # 计算相对路径，比如 "archive/2026-02-08.md"
-                        rel_path = os.path.relpath(os.path.join(root, file), path)
-                        all_memories.append(rel_path)
+                    # 咱们暂时不限制 .md 了，看看里面到底都有什么
+                    # 计算相对于保险柜根目录的路径
+                    rel_path = os.path.relpath(os.path.join(root, file), path)
+                    # 过滤掉一些没用的系统缓存文件
+                    if not file.startswith('.') and 'cache' not in file:
+                        all_files_found.append(rel_path)
             
-            if not all_memories:
-                return ["还没找到 .md 文件，请确认抽屉里是否有信"]
+            if not all_files_found:
+                # 如果还是空的，咱们就把文件夹结构直接打印出来看看
+                structure = os.listdir(path)
+                return [f"根目录下只有这些: {structure}，请确认记忆在哪"]
                 
-            return sorted(all_memories, reverse=True)
-
-        @full_web_app.get("/api/read-memory")
-        async def read_memory(name: str):
-            # 支持读取子文件夹里的文件
-            path = os.path.join(get_memory_path(), name)
-            with open(path, "r", encoding="utf-8") as f:
-                return {"content": f.read()}
+            return sorted(all_files_found, reverse=True)
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
