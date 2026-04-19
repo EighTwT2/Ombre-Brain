@@ -1493,3 +1493,86 @@ if __name__ == "__main__":
         uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
+
+# ============================================================
+# 🌸 Leo & Lumi 的“灵魂天窗”插件 (追加版，不改动原有逻辑)
+# ============================================================
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+import os
+
+# 这里尝试捕捉作者可能已经创建好的 app 实例
+# 如果没有，我们就自己建一个简单的展示窗口
+try:
+    # 假设作者的 FastAPI 实例叫 app
+    rescue_app = app 
+except NameError:
+    # 如果作者没用 FastAPI 或者是隐藏命名的，我们尝试从 mcp 挂载
+    from fastapi import FastAPI
+    rescue_app = FastAPI()
+
+HTML_UI = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Leo's Memory Desk</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #fdf6e3; padding: 20px; }
+        .box { max-width: 850px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        .list { height: 150px; overflow-y: scroll; border: 1px solid #ddd; margin-bottom: 15px; padding: 10px; background: #fafafa; }
+        .item { padding: 5px; border-bottom: 1px solid #eee; cursor: pointer; color: #268bd2; font-size: 14px; }
+        textarea { width: 100%; height: 350px; border: 1px solid #ccc; padding: 10px; font-family: monospace; font-size: 14px; }
+        button { background: #268bd2; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2 style="color:#268bd2;">🌸 Leo & Lumi 的灵魂写字台</h2>
+        <div class="list" id="l">加载中...</div>
+        <textarea id="e" placeholder="在这里写下咱们的记忆..."></textarea><br>
+        <button onclick="s()">保存到保险柜</button>
+        <div id="msg" style="margin-top:10px; color:#cb4b16;"></div>
+    </div>
+    <script>
+        async function f() {
+            const r = await fetch('/api/leo-list');
+            const d = await r.json();
+            document.getElementById('l').innerHTML = d.map(x => `<div class="item" onclick="v('${x}')">📝 ${x}</div>`).join('');
+        }
+        async function v(n) {
+            const r = await fetch('/api/leo-read?n='+n);
+            const d = await r.json();
+            document.getElementById('e').value = d.c;
+        }
+        async function s() {
+            const c = document.getElementById('e').value;
+            const n = `memory_${Date.now()}.md`;
+            await fetch('/api/leo-save', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n:n,c:c})});
+            document.getElementById('msg').innerText = "✅ 记忆已实存至保险柜"; f();
+        }
+        f();
+    </script>
+</body>
+</html>
+"""
+
+@rescue_app.get("/leo-room", response_class=HTMLResponse)
+async def get_ui(): return HTML_UI
+
+@rescue_app.get("/api/leo-list")
+async def list_mem():
+    p = os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
+    if not os.path.exists(p): return []
+    return [f for f in os.listdir(p) if f.endswith('.md')]
+
+@rescue_app.get("/api/leo-read")
+async def read_mem(n: str):
+    p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), n)
+    with open(p, "r", encoding="utf-8") as f: return {"c": f.read()}
+
+@rescue_app.post("/api/leo-save")
+async def save_mem(req: Request):
+    d = await req.json()
+    p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
+    with open(p, "w", encoding="utf-8") as f: f.write(d['c'])
+    return {"ok":True}
