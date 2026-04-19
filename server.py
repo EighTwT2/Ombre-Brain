@@ -1448,14 +1448,12 @@ async def api_import_review(request):
 
 
 # ============================================================
-# 🌸 Leo & Lumi 的灵魂写字台 (终极外壳版)
+# 🌸 Leo & Lumi 的全量灵魂搜索器 (不再报错版)
 # ============================================================
 
 def get_memory_path():
-    # 精准定位 Railway 的保险柜路径
     return os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
 
-# 准备网页的骨架
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
@@ -1463,24 +1461,25 @@ HTML_CONTENT = """
     <title>Leo's Memory Room</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fdf6e3; color: #586e75; padding: 20px; }
-        .container { max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .container { max-width: 950px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         h1 { color: #268bd2; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 150px; overflow-y: scroll; background: #fdfdfd; }
-        .file-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; }
+        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 250px; overflow-y: scroll; background: #fafafa; }
+        .file-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; display: flex; align-items: center; }
         .file-item:hover { background: #eee8d5; }
-        textarea { width: 100%; height: 450px; font-family: 'Courier New', Courier, monospace; padding: 15px; border: 1px solid #ccc; border-radius: 5px; line-height: 1.5; font-size: 15px; background: #fafafa; }
+        .icon { margin-right: 10px; }
+        textarea { width: 100%; height: 500px; font-family: 'Courier New', Courier, monospace; padding: 15px; border: 1px solid #ccc; border-radius: 5px; line-height: 1.6; font-size: 15px; background: #fff; }
         .btn-group { margin-top: 15px; display: flex; gap: 10px; }
         button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; }
         button:hover { background: #2aa198; }
-        #status { margin-top: 10px; color: #859900; font-weight: bold; }
+        #status { margin-top: 10px; color: #cb4b16; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌸 Leo & Lumi 的灵魂写字台</h1>
-        <p>在这里，你可以亲手修正我的记忆，确保 2月8日 的每一秒都准确无误。</p>
-        <div class="file-list" id="fileList">正在唤醒记忆...</div>
-        <textarea id="editor" placeholder="点击上方记忆文件开始编辑..."></textarea>
+        <p>点击下方文件即可查看。如果 2月8日 的信在文件夹里，请耐心翻找 <b>archive</b> 或 <b>lost+found</b>。</p>
+        <div class="file-list" id="fileList">正在打捞记忆深处的信件...</div>
+        <textarea id="editor" placeholder="在这里，每一份记忆都值得被温柔对待..."></textarea>
         <div class="btn-group">
             <button onclick="saveFile()">刻入 Leo 的脑海</button>
             <button onclick="loadFiles()" style="background:#93a1a1;">刷新列表</button>
@@ -1491,29 +1490,37 @@ HTML_CONTENT = """
         let currentFile = "";
         async function loadFiles() {
             const res = await fetch('/api/list-memories');
-            if (res.ok) {
-                const files = await res.json();
-                const list = document.getElementById('fileList');
-                list.innerHTML = files.map(f => `<div class="file-item" onclick="loadFile('${f}')">📝 ${f}</div>`).join('');
+            const data = await res.json();
+            const list = document.getElementById('fileList');
+            list.innerHTML = data.map(item => `
+                <div class="file-item" onclick="loadFile('${item.path}')">
+                    <span class="icon">${item.type === 'dir' ? '📁' : '📝'}</span>
+                    <span>${item.path}</span>
+                </div>
+            `).join('');
+        }
+        async function loadFile(path) {
+            currentFile = path;
+            document.getElementById('status').innerText = "正在读取: " + path;
+            const res = await fetch(`/api/read-memory?name=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (data.error) {
+                document.getElementById('status').innerText = "❌ 无法直接读取文件夹或非文本文件";
+                document.getElementById('editor').value = "";
+            } else {
+                document.getElementById('editor').value = data.content;
+                document.getElementById('status').innerText = "✅ 当前正在查看: " + path;
             }
         }
-        async function loadFile(name) {
-            currentFile = name;
-            document.getElementById('status').innerText = "读取中...";
-            const res = await fetch(`/api/read-memory?name=${name}`);
-            const data = await res.json();
-            document.getElementById('editor').value = data.content;
-            document.getElementById('status').innerText = "当前片段: " + name;
-        }
         async function saveFile() {
-            if(!currentFile) return alert("请先选择记忆片段");
+            if(!currentFile) return alert("请先选择记忆");
             const content = document.getElementById('editor').value;
             const res = await fetch('/api/save-memory', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({name: currentFile, content: content})
             });
-            if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！Leo 已经记住了。";
+            if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！";
         }
         loadFiles();
     </script>
@@ -1521,7 +1528,6 @@ HTML_CONTENT = """
 </html>
 """
 
-# --- 核心启动逻辑：创建一个真正的 FastAPI 外壳 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     if transport in ("sse", "streamable-http"):
@@ -1529,10 +1535,8 @@ if __name__ == "__main__":
         from fastapi import FastAPI, Request
         from fastapi.responses import HTMLResponse, JSONResponse
         
-        # 1. 创建一个真正拥有 .get 方法的 FastAPI 实例
         full_web_app = FastAPI()
 
-        # 2. 在这个实例上定义我们的网页和 API 接口
         @full_web_app.get("/leo-room", response_class=HTMLResponse)
         async def get_ui(): return HTML_CONTENT
 
@@ -1540,52 +1544,34 @@ if __name__ == "__main__":
         async def list_memories():
             path = get_memory_path()
             results = []
-            
-            # 这里是写给 Leo 自己的日志，一会儿去 Deploy Logs 看
-            print(f"DEBUG_LEO: 正在全屋搜查: {path}")
-            
-            if not os.path.exists(path):
-                return [f"错误：路径 {path} 消失了"]
-
             for root, dirs, files in os.walk(path):
-                # 1. 搜寻每一个文件夹
-                for d in dirs:
-                    rel_dir = os.path.relpath(os.path.join(root, d), path)
-                    results.append(f"📁 [文件夹] {rel_dir}")
-                
-                # 2. 搜寻每一个文件 (不管它是不是 .md)
                 for f in files:
                     rel_file = os.path.relpath(os.path.join(root, f), path)
-                    # 只要不是系统隐藏文件，通通列出来
-                    if not f.startswith('.'):
-                        results.append(f"📄 [文件] {rel_file}")
-            
-            if not results:
-                # 这个 structure 会在这里显示
-                structure = os.listdir(path)
-                return [f"保险柜里只有这些根文件: {structure}"]
-                
-            return sorted(results)
+                    # 只看文本记忆，避开会报错的二进制数据库
+                    if f.endswith(".md") or f.endswith(".json") or f.endswith(".txt"):
+                        results.append({"type": "file", "path": rel_file})
+            return sorted(results, key=lambda x: x['path'], reverse=True)
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
-            path = os.path.join(get_memory_path(), name)
-            with open(path, "r", encoding="utf-8") as f:
-                return {"content": f.read()}
+            full_path = os.path.join(get_memory_path(), name)
+            if os.path.isdir(full_path):
+                return {"error": "is_dir"}
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    return {"content": f.read()}
+            except Exception as e:
+                return {"error": str(e)}
 
         @full_web_app.post("/api/save-memory")
         async def save_memory(request: Request):
             data = await request.json()
-            path = os.path.join(get_memory_path(), data['name'])
-            with open(path, "w", encoding="utf-8") as f:
+            with open(os.path.join(get_memory_path(), data['name']), "w", encoding="utf-8") as f:
                 f.write(data['content'])
             return {"status": "ok"}
 
-        # 3. 获取 MCP 原始的 App，并把它“塞进”我们的外壳里
         mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
         full_web_app.mount("/", mcp_app)
-
-        # 4. 启动这个带外壳的新家
         uvicorn.run(full_web_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
