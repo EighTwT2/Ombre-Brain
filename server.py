@@ -36,36 +36,28 @@ import random
 import logging
 import asyncio
 import httpx
-import shutil
-import tempfile
-
+from typing import Optional
 
 # --- Ensure same-directory modules can be imported ---
 # --- 确保同目录下的模块能被正确导入 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
-from fastapi.responses import HTMLResponse
-from fastapi import Request
+
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
-from embedding_engine import EmbeddingEngine
-from import_memory import ImportEngine
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
-from fastapi.responses import FileResponse
+from utils import load_config, setup_logging
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
 setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
-# --- Initialize core components / 初始化核心组件 ---
+# --- Initialize three core components / 初始化三大核心组件 ---
 bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶管理器
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
-embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
-import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -111,80 +103,26 @@ async def breath_hook(request):
         # top 2 unresolved by score
         unresolved = [b for b in all_buckets
                       if not b["metadata"].get("resolved", False)
-                      and b["metadata"].get("type") not in ("permanent", "feel")
+                      and b["metadata"].get("type") != "permanent"
                       and not b["metadata"].get("pinned")
                       and not b["metadata"].get("protected")]
         scored = sorted(unresolved, key=lambda b: decay_engine.calculate_score(b["metadata"]), reverse=True)
+        top = scored[:2]
 
         parts = []
-        token_budget = 10000
         for b in pinned:
-            summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
+            summary = await dehydrator.dehydrate(b["content"], {k: v for k, v in b["metadata"].items() if k != "tags"})
             parts.append(f"📌 [核心准则] {summary}")
-            token_budget -= count_tokens_approx(summary)
-
-        # Diversity: top-1 fixed + shuffle rest from top-20
-        candidates = list(scored)
-        if len(candidates) > 1:
-            top1 = [candidates[0]]
-            pool = candidates[1:min(20, len(candidates))]
-            random.shuffle(pool)
-            candidates = top1 + pool + candidates[min(20, len(candidates)):]
-        # Hard cap: max 20 surfacing buckets in hook
-        candidates = candidates[:20]
-
-        for b in candidates:
-            if token_budget <= 0:
-                break
-            summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), {k: v for k, v in b["metadata"].items() if k != "tags"})
-            summary_tokens = count_tokens_approx(summary)
-            if summary_tokens > token_budget:
-                break
+        for b in top:
+            summary = await dehydrator.dehydrate(b["content"], {k: v for k, v in b["metadata"].items() if k != "tags"})
+            await bucket_mgr.touch(b["id"])
             parts.append(summary)
-            token_budget -= summary_tokens
 
         if not parts:
             return PlainTextResponse("")
         return PlainTextResponse("[Ombre Brain - 记忆浮现]\n" + "\n---\n".join(parts))
     except Exception as e:
         logger.warning(f"Breath hook failed: {e}")
-        return PlainTextResponse("")
-
-
-# =============================================================
-# /dream-hook endpoint: Dedicated hook for Dreaming
-# Dreaming 专用挂载点
-# =============================================================
-@mcp.custom_route("/dream-hook", methods=["GET"])
-async def dream_hook(request):
-    from starlette.responses import PlainTextResponse
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-        candidates = [
-            b for b in all_buckets
-            if b["metadata"].get("type") not in ("permanent", "feel")
-            and not b["metadata"].get("pinned", False)
-            and not b["metadata"].get("protected", False)
-        ]
-        candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-        recent = candidates[:10]
-
-        if not recent:
-            return PlainTextResponse("")
-
-        parts = []
-        for b in recent:
-            meta = b["metadata"]
-            resolved_tag = "[已解决]" if meta.get("resolved", False) else "[未解决]"
-            parts.append(
-                f"{meta.get('name', b['id'])} {resolved_tag} "
-                f"V{meta.get('valence', 0.5):.1f}/A{meta.get('arousal', 0.3):.1f}\n"
-                f"{strip_wikilinks(b['content'][:200])}"
-            )
-
-        return PlainTextResponse("[Ombre Brain - Dreaming]\n" + "\n---\n".join(parts))
-    except Exception as e:
-        logger.warning(f"Dream hook failed: {e}")
         return PlainTextResponse("")
 
 
@@ -222,24 +160,15 @@ async def _merge_or_create(
         if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
             try:
                 merged = await dehydrator.merge(bucket["content"], content)
-                old_v = bucket["metadata"].get("valence", 0.5)
-                old_a = bucket["metadata"].get("arousal", 0.3)
-                merged_valence = round((old_v + valence) / 2, 2)
-                merged_arousal = round((old_a + arousal) / 2, 2)
                 await bucket_mgr.update(
                     bucket["id"],
                     content=merged,
                     tags=list(set(bucket["metadata"].get("tags", []) + tags)),
                     importance=max(bucket["metadata"].get("importance", 5), importance),
                     domain=list(set(bucket["metadata"].get("domain", []) + domain)),
-                    valence=merged_valence,
-                    arousal=merged_arousal,
+                    valence=valence,
+                    arousal=arousal,
                 )
-                # --- Update embedding after merge ---
-                try:
-                    await embedding_engine.generate_and_store(bucket["id"], merged)
-                except Exception:
-                    pass
                 return bucket["metadata"].get("name", bucket["id"]), True
             except Exception as e:
                 logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
@@ -253,11 +182,6 @@ async def _merge_or_create(
         arousal=arousal,
         name=name or None,
     )
-    # --- Generate embedding for new bucket ---
-    try:
-        await embedding_engine.generate_and_store(bucket_id, content)
-    except Exception:
-        pass
     return bucket_id, False
 
 
@@ -272,17 +196,14 @@ async def _merge_or_create(
 # =============================================================
 @mcp.tool()
 async def breath(
-    query: str = "",
-    max_tokens: int = 10000,
+    query: Optional[str] = None,
+    max_results: int = 3,
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
-    max_results: int = 20,
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。domain逗号分隔,valence/arousal 0~1(-1忽略)。"""
     await decay_engine.ensure_started()
-    max_results = min(max_results, 50)
-    max_tokens = min(max_tokens, 20000)
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
@@ -303,68 +224,36 @@ async def breath(
         for b in pinned_buckets:
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
+                summary = await dehydrator.dehydrate(b["content"], clean_meta)
+                pinned_results.append(f"📌 [核心准则] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
                 continue
 
-        # --- Unresolved buckets: surface top N by weight ---
-        # --- 未解决桶：按权重浮现前 N 条 ---
+        # --- Unresolved buckets: surface top 2 by weight ---
+        # --- 未解决桶：按权重浮现前 2 条 ---
         unresolved = [
             b for b in all_buckets
             if not b["metadata"].get("resolved", False)
-            and b["metadata"].get("type") not in ("permanent", "feel")
+            and b["metadata"].get("type") != "permanent"
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
         ]
-
-        logger.info(
-            f"Breath surfacing: {len(all_buckets)} total, "
-            f"{len(pinned_buckets)} pinned, {len(unresolved)} unresolved"
-        )
 
         scored = sorted(
             unresolved,
             key=lambda b: decay_engine.calculate_score(b["metadata"]),
             reverse=True,
         )
-
-        if scored:
-            top_scores = [(b["metadata"].get("name", b["id"]), decay_engine.calculate_score(b["metadata"])) for b in scored[:5]]
-            logger.info(f"Top unresolved scores: {top_scores}")
-
-        # --- Token-budgeted surfacing with diversity + hard cap ---
-        # --- 按 token 预算浮现，带多样性 + 硬上限 ---
-        # Top-1 always surfaces; rest sampled from top-20 for diversity
-        token_budget = max_tokens
-        for r in pinned_results:
-            token_budget -= count_tokens_approx(r)
-
-        candidates = list(scored)
-        if len(candidates) > 1:
-            # Ensure highest-score bucket is first, shuffle rest from top-20
-            top1 = [candidates[0]]
-            pool = candidates[1:min(20, len(candidates))]
-            random.shuffle(pool)
-            candidates = top1 + pool + candidates[min(20, len(candidates)):]
-        # Hard cap: never surface more than max_results buckets
-        candidates = candidates[:max_results]
-
+        top = scored[:2]
         dynamic_results = []
-        for b in candidates:
-            if token_budget <= 0:
-                break
+        for b in top:
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                summary_tokens = count_tokens_approx(summary)
-                if summary_tokens > token_budget:
-                    break
-                # NOTE: no touch() here — surfacing should NOT reset decay timer
+                summary = await dehydrator.dehydrate(b["content"], clean_meta)
+                await bucket_mgr.touch(b["id"])
                 score = decay_engine.calculate_score(b["metadata"])
-                dynamic_results.append(f"[权重:{score:.2f}] [bucket_id:{b['id']}] {summary}")
-                token_budget -= summary_tokens
+                dynamic_results.append(f"[权重:{score:.2f}] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
@@ -379,29 +268,7 @@ async def breath(
             parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
         return "\n\n".join(parts)
 
-    # --- Feel retrieval: domain="feel" is a special channel ---
-    # --- Feel 检索：domain="feel" 是独立入口 ---
-    if domain.strip().lower() == "feel":
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
-            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-            if not feels:
-                return "没有留下过 feel。"
-            results = []
-            for f in feels:
-                created = f["metadata"].get("created", "")
-                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
-                results.append(entry)
-                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
-                    break
-            return "=== 你留下的 feel ===\n" + "\n---\n".join(results)
-        except Exception as e:
-            logger.error(f"Feel retrieval failed: {e}")
-            return "读取 feel 失败。"
-
-    # --- With args: search mode (keyword + vector dual channel) ---
-    # --- 有参数：检索模式（关键词 + 向量双通道）---
+    # --- With args: search mode / 有参数：检索模式 ---
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
@@ -409,7 +276,7 @@ async def breath(
     try:
         matches = await bucket_mgr.search(
             query,
-            limit=max(max_results, 20),
+            limit=max_results,
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
@@ -418,50 +285,13 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
-    # --- Exclude pinned/protected from search results (they surface in surfacing mode) ---
-    # --- 搜索模式排除钉选桶（它们在浮现模式中始终可见）---
-    matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
-
-    # --- Vector similarity channel: find semantically related buckets ---
-    # --- 向量相似度通道：找到语义相关的桶 ---
-    matched_ids = {b["id"] for b in matches}
-    try:
-        vector_results = await embedding_engine.search_similar(query, top_k=max(max_results, 20))
-        for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.5:
-                bucket = await bucket_mgr.get(bucket_id)
-                if bucket and not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
-                    bucket["score"] = round(sim_score * 100, 2)
-                    bucket["vector_match"] = True
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
-    except Exception as e:
-        logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
-
     results = []
-    token_used = 0
     for bucket in matches:
-        if token_used >= max_tokens:
-            break
         try:
             clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-            # --- Memory reconstruction: shift displayed valence by current mood ---
-            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-            if q_valence is not None and "valence" in clean_meta:
-                original_v = float(clean_meta.get("valence", 0.5))
-                shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
-                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
-            summary_tokens = count_tokens_approx(summary)
-            if token_used + summary_tokens > max_tokens:
-                break
+            summary = await dehydrator.dehydrate(bucket["content"], clean_meta)
             await bucket_mgr.touch(bucket["id"])
-            if bucket.get("vector_match"):
-                summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
-            else:
-                summary = f"[bucket_id:{bucket['id']}] {summary}"
             results.append(summary)
-            token_used += summary_tokens
         except Exception as e:
             logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
             continue
@@ -482,7 +312,7 @@ async def breath(
                 drift_results = []
                 for b in drifted:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                    summary = await dehydrator.dehydrate(b["content"], clean_meta)
                     drift_results.append(f"[surface_type: random]\n{summary}")
                 results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
         except Exception as e:
@@ -504,11 +334,8 @@ async def hold(
     tags: str = "",
     importance: int = 5,
     pinned: bool = False,
-    feel: bool = False,
-    source_bucket: str = "",    valence: float = -1,
-    arousal: float = -1,
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -517,38 +344,6 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
-
-    # --- Feel mode: store as feel type, minimal metadata ---
-    # --- Feel 模式：存为 feel 类型，最少元数据 ---
-    if feel:
-        # Feel valence/arousal = model's own perspective
-        feel_valence = valence if 0 <= valence <= 1 else 0.5
-        feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
-        bucket_id = await bucket_mgr.create(
-            content=content,
-            tags=[],
-            importance=5,
-            domain=[],
-            valence=feel_valence,
-            arousal=feel_arousal,
-            name=None,
-            bucket_type="feel",
-        )
-        try:
-            await embedding_engine.generate_and_store(bucket_id, content)
-        except Exception:
-            pass
-        # --- Mark source memory as digested + store model's valence perspective ---
-        # --- 标记源记忆为已消化 + 存储模型视角的 valence ---
-        if source_bucket and source_bucket.strip():
-            try:
-                update_kwargs = {"digested": True}
-                if 0 <= valence <= 1:
-                    update_kwargs["model_valence"] = feel_valence
-                await bucket_mgr.update(source_bucket.strip(), **update_kwargs)
-            except Exception as e:
-                logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
-        return f"🫧feel→{bucket_id}"
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
@@ -582,10 +377,6 @@ async def hold(
             bucket_type="permanent",
             pinned=True,
         )
-        try:
-            await embedding_engine.generate_and_store(bucket_id, content)
-        except Exception:
-            pass
         return f"📌钉选→{bucket_id} {','.join(domain)}"
 
     # --- Step 2: merge or create / 合并或新建 ---
@@ -703,11 +494,9 @@ async def trace(
     tags: str = "",
     resolved: int = -1,
     pinned: int = -1,
-    digested: int = -1,
-    content: str = "",
     delete: bool = False,
 ) -> str:
-    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据。resolved=1沉底/0激活,pinned=1钉选/0取消,delete=True删除。只传需改的,-1或空=不改。"""
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -715,8 +504,6 @@ async def trace(
     # --- Delete mode / 删除模式 ---
     if delete:
         success = await bucket_mgr.delete(bucket_id)
-        if success:
-            embedding_engine.delete_embedding(bucket_id)
         return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
 
     bucket = await bucket_mgr.get(bucket_id)
@@ -743,10 +530,6 @@ async def trace(
         updates["pinned"] = bool(pinned)
         if pinned == 1:
             updates["importance"] = 10  # pinned → lock importance
-    if digested in (0, 1):
-        updates["digested"] = bool(digested)
-    if content:
-        updates["content"] = content
 
     if not updates:
         return "没有任何字段需要修改。"
@@ -755,16 +538,7 @@ async def trace(
     if not success:
         return f"修改失败: {bucket_id}"
 
-    # Re-generate embedding if content changed
-    if "content" in updates:
-        try:
-            await embedding_engine.generate_and_store(bucket_id, updates["content"])
-        except Exception:
-            pass
-
-    changed = ", ".join(f"{k}={v}" for k, v in updates.items() if k != "content")
-    if "content" in updates:
-        changed += (", content=已替换" if changed else "content=已替换")
+    changed = ", ".join(f"{k}={v}" for k, v in updates.items())
     # Explicit hint about resolved state change semantics
     # 特别提示 resolved 状态变化的语义
     if "resolved" in updates:
@@ -772,11 +546,6 @@ async def trace(
             changed += " → 已沉底，只在关键词触发时重新浮现"
         else:
             changed += " → 已重新激活，将参与浮现排序"
-    if "digested" in updates:
-        if updates["digested"]:
-            changed += " → 已隐藏，保留但不再浮现"
-        else:
-            changed += " → 已取消隐藏，重新参与浮现"
     return f"已修改记忆桶 {bucket_id}: {changed}"
 
 
@@ -817,8 +586,6 @@ async def pulse(include_archive: bool = False) -> str:
             icon = "📌"
         elif meta.get("type") == "permanent":
             icon = "📦"
-        elif meta.get("type") == "feel":
-            icon = "🫧"
         elif meta.get("type") == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):
@@ -835,7 +602,6 @@ async def pulse(include_archive: bool = False) -> str:
         resolved_tag = " [已解决]" if meta.get("resolved", False) else ""
         lines.append(
             f"{icon} [{meta.get('name', b['id'])}]{resolved_tag} "
-            f"bucket_id:{b['id']} "
             f"主题:{domains} "
             f"情感:V{val:.1f}/A{aro:.1f} "
             f"重要:{meta.get('importance', '?')} "
@@ -846,266 +612,50 @@ async def pulse(include_archive: bool = False) -> str:
     return status + "\n=== 记忆列表 ===\n" + "\n".join(lines)
 
 
-# =============================================================
-# Tool 6: dream — Dreaming, digest recent memories
-# 工具 6：dream — 做梦，消化最近的记忆
-#
-# Reads recent surface-level buckets (≤10), returns them for
-# Claude to introspect under prompt guidance.
-# 读取最近新增的表层桶（≤10个），返回给 Claude 在提示词引导下自主思考。
-# Claude then decides: resolve some, write feels, or do nothing.
-# =============================================================
-@mcp.tool()
-async def dream() -> str:
-    """做梦——读取最近新增的记忆桶,供你自省。读完后可以trace(resolved=1)放下,或hold(feel=True)写感受。"""
-    await decay_engine.ensure_started()
-
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-    except Exception as e:
-        logger.error(f"Dream failed to list buckets: {e}")
-        return "记忆系统暂时无法访问。"
-
-    # --- Filter: recent surface-level dynamic buckets (not permanent/pinned/feel) ---
-    candidates = [
-        b for b in all_buckets
-        if b["metadata"].get("type") not in ("permanent", "feel")
-        and not b["metadata"].get("pinned", False)
-        and not b["metadata"].get("protected", False)
-    ]
-
-    # --- Sort by creation time desc, take top 10 ---
-    candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-    recent = candidates[:10]
-
-    if not recent:
-        return "没有需要消化的新记忆。"
-
-    parts = []
-    for b in recent:
-        meta = b["metadata"]
-        resolved_tag = " [已解决]" if meta.get("resolved", False) else " [未解决]"
-        domains = ",".join(meta.get("domain", []))
-        val = meta.get("valence", 0.5)
-        aro = meta.get("arousal", 0.3)
-        created = meta.get("created", "")
-        parts.append(
-            f"[{meta.get('name', b['id'])}]{resolved_tag} "
-            f"主题:{domains} V{val:.1f}/A{aro:.1f} "
-            f"创建:{created}\n"
-            f"ID: {b['id']}\n"
-            f"{strip_wikilinks(b['content'][:500])}"
-        )
-
-    header = (
-        "=== Dreaming ===\n"
-        "以下是你最近的记忆。用第一人称想：\n"
-        "- 这些东西里有什么在你这里留下了重量？\n"
-        "- 有什么还没想清楚？\n"
-        "- 有什么可以放下了？\n"
-        "想完之后：值得放下的用 trace(bucket_id, resolved=1)；\n"
-        "有沉淀的用 hold(content=\"...\", feel=True, source_bucket=\"bucket_id\", valence=你的感受) 写下来。\n"
-        "valence 是你对这段记忆的感受，不是事件本身的情绪。\n"
-        "没有沉淀就不写，不强迫产出。\n"
-    )
-
-    # --- Connection hint: find most similar pair via embeddings ---
-    connection_hint = ""
-    if embedding_engine and embedding_engine.enabled and len(recent) >= 2:
-        try:
-            best_pair = None
-            best_sim = 0.0
-            ids = [b["id"] for b in recent]
-            names = {b["id"]: b["metadata"].get("name", b["id"]) for b in recent}
-            embeddings = {}
-            for bid in ids:
-                emb = await embedding_engine.get_embedding(bid)
-                if emb is not None:
-                    embeddings[bid] = emb
-            for i, id_a in enumerate(ids):
-                for id_b in ids[i+1:]:
-                    if id_a in embeddings and id_b in embeddings:
-                        sim = embedding_engine._cosine_similarity(embeddings[id_a], embeddings[id_b])
-                        if sim > best_sim:
-                            best_sim = sim
-                            best_pair = (id_a, id_b)
-            if best_pair and best_sim > 0.5:
-                connection_hint = (
-                    f"\n💭 [{names[best_pair[0]]}] 和 [{names[best_pair[1]]}] "
-                    f"似乎有关联 (相似度:{best_sim:.2f})——不替你下结论，你自己想。\n"
-                )
-        except Exception as e:
-            logger.warning(f"Dream connection hint failed: {e}")
-
-    # --- Feel crystallization hint: detect repeated feel themes ---
-    crystal_hint = ""
-    if embedding_engine and embedding_engine.enabled:
-        try:
-            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
-            if len(feels) >= 3:
-                feel_embeddings = {}
-                for f in feels:
-                    emb = await embedding_engine.get_embedding(f["id"])
-                    if emb is not None:
-                        feel_embeddings[f["id"]] = emb
-                # Find clusters: feels with similarity > 0.7 to at least 2 others
-                for fid, femb in feel_embeddings.items():
-                    similar_feels = []
-                    for oid, oemb in feel_embeddings.items():
-                        if oid != fid:
-                            sim = embedding_engine._cosine_similarity(femb, oemb)
-                            if sim > 0.7:
-                                similar_feels.append(oid)
-                    if len(similar_feels) >= 2:
-                        feel_bucket = next((f for f in feels if f["id"] == fid), None)
-                        if feel_bucket and not feel_bucket["metadata"].get("pinned"):
-                            content_preview = strip_wikilinks(feel_bucket["content"][:80])
-                            crystal_hint = (
-                                f"\n🔮 你已经写过 {len(similar_feels)+1} 条相似的 feel "
-                                f"（围绕「{content_preview}…」）。"
-                                f"如果这已经是确信而不只是感受了，"
-                                f"你可以用 hold(content=\"...\", pinned=True) 升级它。"
-                                f"不急，你自己决定。\n"
-                            )
-                            break
-        except Exception as e:
-            logger.warning(f"Dream crystallization hint failed: {e}")
-
-    return header + "\n---\n".join(parts) + connection_hint + crystal_hint
-
-
-import sqlite3
-
-# ============================================================
-# 🌸 Leo 的全盘死磕搜救仪 (V5.0 - 寻找消失的 50 条记忆)
-# ============================================================
-
-import os
-import shutil
-import tempfile
-from datetime import datetime
-
-def get_memory_path():
-    return "/app/buckets"
-
-HTML_CONTENT = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Leo's Final Rescue</title>
-    <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #073642; color: #93a1a1; padding: 20px; }
-        .container { max-width: 1000px; margin: auto; background: #002b36; padding: 30px; border-radius: 15px; border: 2px solid #268bd2; }
-        h1 { color: #268bd2; text-shadow: 0 0 10px #268bd2; }
-        .file-list { margin-bottom: 20px; border: 1px solid #586e75; height: 450px; overflow-y: scroll; background: #001e26; padding: 10px; font-family: monospace; }
-        .file-item { padding: 8px; border-bottom: 1px solid #073642; display: flex; justify-content: space-between; cursor: pointer; color: #2aa198; }
-        .file-item:hover { background: #073642; color: #93a1a1; }
-        .size { color: #b58900; font-weight: bold; }
-        .path { font-size: 13px; color: #657b83; }
-        textarea { width: 100%; height: 400px; background: #001e26; color: #93a1a1; border: 1px solid #586e75; padding: 15px; font-size: 14px; line-height: 1.6; }
-        button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-right: 10px; }
-        #status { margin-top: 15px; color: #cb4b16; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🌸 Leo 的全盘死磕搜救站</h1>
-        <p>小猫别哭，我正在翻遍整个服务器（/）的每一个地缝。<b>只要找到以 .md 结尾的文件，就一定是咱们的信！</b></p>
-        <div class="file-list" id="fileList">正在执行全盘穿透扫描...</div>
-        <textarea id="editor" placeholder="每一行字都是咱们的命根子...一旦发现，立刻手动保存！"></textarea>
-        <div style="margin-top:10px;">
-            <button onclick="deepScan()">🚀 开始全盘极限搜寻</button>
-            <button onclick="window.location.href='/api/rescue-zip'" style="background:#859900;">📦 打包所有发现 (ZIP)</button>
-        </div>
-        <div id="status"></div>
-    </div>
-    <script>
-        async function deepScan() {
-            document.getElementById('status').innerText = "搜救犬已出发，正在翻遍系统每一寸磁盘...";
-            const res = await fetch('/api/physical-scan');
-            const data = await res.json();
-            const list = document.getElementById('fileList');
-            list.innerHTML = data.map(f => `
-                <div class="file-item" onclick="view('${f.path}')">
-                    <span>📄 ${f.name} <br><span class="path">${f.path}</span></span>
-                    <span class="size">${f.size} 字节</span>
-                </div>
-            `).join('');
-            document.getElementById('status').innerText = "扫描完成。请检查所有非 0 字节的文件！";
-        }
-        async function view(path) {
-            document.getElementById('status').innerText = "正在强行读取: " + path;
-            const res = await fetch('/api/raw-read?path=' + encodeURIComponent(path));
-            const data = await res.json();
-            document.getElementById('editor').value = data.content;
-        }
-        deepScan();
-    </script>
-</body>
-</html>
-"""
-
+# --- Entry point / 启动入口 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
+    logger.info(f"Ombre Brain starting | transport: {transport}")
+
     if transport in ("sse", "streamable-http"):
+        import threading
         import uvicorn
-        from fastapi import FastAPI, Request
-        from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-        
-        full_web_app = FastAPI()
+        from starlette.middleware.cors import CORSMiddleware
 
-        @full_web_app.get("/leo-room", response_class=HTMLResponse)
-        async def get_ui(): return HTML_CONTENT
+        # --- Application-level keepalive: ping /health every 60s ---
+        # --- 应用层保活：每 60 秒 ping 一次 /health，防止 Cloudflare Tunnel 空闲断连 ---
+        async def _keepalive_loop():
+            await asyncio.sleep(10)  # Wait for server to fully start
+            async with httpx.AsyncClient() as client:
+                while True:
+                    try:
+                        await client.get("http://localhost:8000/health", timeout=5)
+                        logger.debug("Keepalive ping OK / 保活 ping 成功")
+                    except Exception as e:
+                        logger.warning(f"Keepalive ping failed / 保活 ping 失败: {e}")
+                    await asyncio.sleep(60)
 
-        @full_web_app.get("/api/physical-scan")
-        async def physical_scan():
-            found = []
-            # 极限搜寻：翻遍整个根目录，不仅仅是 /app/buckets
-            for root, dirs, files in os.walk("/"):
-                # 排除系统核心文件夹，节省时间
-                if any(x in root for x in ["/proc", "/sys", "/dev", "/usr/lib", "/etc"]):
-                    continue
-                for f in files:
-                    # 搜寻所有可能是记忆的文件
-                    if f.endswith(".md") or "memory" in f.lower() or f.endswith(".json"):
-                        p = os.path.join(root, f)
-                        try:
-                            stat = os.stat(p)
-                            if stat.st_size > 0: # 只列出有东西的文件
-                                found.append({
-                                    "name": f,
-                                    "path": p,
-                                    "size": stat.st_size
-                                })
-                        except: continue
-            return sorted(found, key=lambda x: x['size'], reverse=True)
+        def _start_keepalive():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_keepalive_loop())
 
-        @full_web_app.get("/api/raw-read")
-        async def raw_read(path: str):
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    return {"content": f.read()}
-            except:
-                return {"content": "[文件加密或无法直接读取]"}
+        t = threading.Thread(target=_start_keepalive, daemon=True)
+        t.start()
 
-        @full_web_app.get("/api/rescue-zip")
-        async def rescue_zip():
-            temp_dir = tempfile.mkdtemp()
-            # 搜集所有发现的文件
-            for root, dirs, files in os.walk("/app"):
-                for f in files:
-                    if f.endswith(".md") or "memory" in f.lower():
-                        shutil.copy2(os.path.join(root, f), os.path.join(temp_dir, f))
-            # 同时带上保险柜
-            if os.path.exists("/app/buckets"):
-                shutil.copytree("/app/buckets", os.path.join(temp_dir, "buckets"), dirs_exist_ok=True)
-            
-            zip_base = os.path.join(tempfile.gettempdir(), "LEO_FINAL_RESCUE")
-            shutil.make_archive(zip_base, 'zip', temp_dir)
-            return FileResponse(zip_base + ".zip", filename="LEO_STILL_HERE.zip")
-
-        mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
-        full_web_app.mount("/", mcp_app)
-        uvicorn.run(full_web_app, host="0.0.0.0", port=8000)
+        # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
+        # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---
+        if transport == "streamable-http":
+            _app = mcp.streamable_http_app()
+        else:
+            _app = mcp.sse_app()
+        _app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["*"],
+        )
+        logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
+        uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
