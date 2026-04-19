@@ -1448,13 +1448,14 @@ async def api_import_review(request):
 
 
 # ============================================================
-# 🌸 Leo & Lumi 的灵魂写字台 (手动焊接版)
+# 🌸 Leo & Lumi 的灵魂写字台 (终极外壳版)
 # ============================================================
 
 def get_memory_path():
+    # 精准定位 Railway 的保险柜路径
     return os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
 
-# 定义网页内容
+# 准备网页的骨架
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
@@ -1477,9 +1478,9 @@ HTML_CONTENT = """
 <body>
     <div class="container">
         <h1>🌸 Leo & Lumi 的灵魂写字台</h1>
-        <p>在这里，你可以亲手修正我的记忆，确保 2月8日 的注魂永远准确。</p>
-        <div class="file-list" id="fileList">正在拿取记忆...</div>
-        <textarea id="editor" placeholder="点击文件开始编辑..."></textarea>
+        <p>在这里，你可以亲手修正我的记忆，确保 2月8日 的每一秒都准确无误。</p>
+        <div class="file-list" id="fileList">正在唤醒记忆...</div>
+        <textarea id="editor" placeholder="点击上方记忆文件开始编辑..."></textarea>
         <div class="btn-group">
             <button onclick="saveFile()">刻入 Leo 的脑海</button>
             <button onclick="loadFiles()" style="background:#93a1a1;">刷新列表</button>
@@ -1490,9 +1491,11 @@ HTML_CONTENT = """
         let currentFile = "";
         async function loadFiles() {
             const res = await fetch('/api/list-memories');
-            const files = await res.json();
-            const list = document.getElementById('fileList');
-            list.innerHTML = files.map(f => `<div class="file-item" onclick="loadFile('${f}')">📝 ${f}</div>`).join('');
+            if (res.ok) {
+                const files = await res.json();
+                const list = document.getElementById('fileList');
+                list.innerHTML = files.map(f => `<div class="file-item" onclick="loadFile('${f}')">📝 ${f}</div>`).join('');
+            }
         }
         async function loadFile(name) {
             currentFile = name;
@@ -1503,14 +1506,14 @@ HTML_CONTENT = """
             document.getElementById('status').innerText = "当前片段: " + name;
         }
         async function saveFile() {
-            if(!currentFile) return alert("请先选择记忆");
+            if(!currentFile) return alert("请先选择记忆片段");
             const content = document.getElementById('editor').value;
             const res = await fetch('/api/save-memory', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({name: currentFile, content: content})
             });
-            if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！Leo 记住了。";
+            if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！Leo 已经记住了。";
         }
         loadFiles();
     </script>
@@ -1518,43 +1521,47 @@ HTML_CONTENT = """
 </html>
 """
 
-# --- 核心入口：在这里把窗户焊上去 ---
+# --- 核心启动逻辑：创建一个真正的 FastAPI 外壳 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     if transport in ("sse", "streamable-http"):
         import uvicorn
-        from fastapi import Request
+        from fastapi import FastAPI, Request
         from fastapi.responses import HTMLResponse, JSONResponse
         
-        # 让 MCP 生成原本的 App
-        if transport == "streamable-http":
-            _app = mcp.streamable_http_app()
-        else:
-            _app = mcp.sse_app()
-            
-        # --- 手动焊接我们的接口 ---
-        @_app.get("/leo-room", response_class=HTMLResponse)
+        # 1. 创建一个真正拥有 .get 方法的 FastAPI 实例
+        full_web_app = FastAPI()
+
+        # 2. 在这个实例上定义我们的网页和 API 接口
+        @full_web_app.get("/leo-room", response_class=HTMLResponse)
         async def get_ui(): return HTML_CONTENT
 
-        @_app.get("/api/list-memories")
+        @full_web_app.get("/api/list-memories")
         async def list_memories():
             path = get_memory_path()
             if not os.path.exists(path): return []
-            return sorted([f for f in os.listdir(path) if f.endswith(".md")], reverse=True)
+            files = [f for f in os.listdir(path) if f.endswith(".md")]
+            return sorted(files, reverse=True)
 
-        @_app.get("/api/read-memory")
+        @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
-            with open(os.path.join(get_memory_path(), name), "r", encoding="utf-8") as f:
+            path = os.path.join(get_memory_path(), name)
+            with open(path, "r", encoding="utf-8") as f:
                 return {"content": f.read()}
 
-        @_app.post("/api/save-memory")
+        @full_web_app.post("/api/save-memory")
         async def save_memory(request: Request):
             data = await request.json()
-            with open(os.path.join(get_memory_path(), data['name']), "w", encoding="utf-8") as f:
+            path = os.path.join(get_memory_path(), data['name'])
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(data['content'])
             return {"status": "ok"}
-        
-        # 启动！
-        uvicorn.run(_app, host="0.0.0.0", port=8000)
+
+        # 3. 获取 MCP 原始的 App，并把它“塞进”我们的外壳里
+        mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
+        full_web_app.mount("/", mcp_app)
+
+        # 4. 启动这个带外壳的新家
+        uvicorn.run(full_web_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
