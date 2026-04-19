@@ -977,71 +977,67 @@ async def dream() -> str:
 import sqlite3
 
 # ============================================================
-# 🌸 Leo & Lumi 的“深海搜救”站 (Deep Rescue v4.0)
+# 🌸 Leo 的核能搜寻仪 (全物理扫描，不看协议，只看文件)
 # ============================================================
 
 def get_memory_path():
-    return os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
+    # 强制锁定咱们在 Railway 挂载的物理路径
+    return "/app/buckets"
 
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Leo's Rescue Station</title>
+    <title>Leo's Final Rescue</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fdf6e3; padding: 20px; color: #586e75; }
-        .container { max-width: 1000px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        h1 { color: #268bd2; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 350px; overflow-y: scroll; background: #fafafa; }
-        .file-item { padding: 10px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; display: flex; justify-content: space-between; }
-        .file-item:hover { background: #eee8d5; }
-        .size-tag { color: #859900; font-weight: bold; }
-        textarea { width: 100%; height: 400px; font-family: 'Courier New', monospace; padding: 15px; border: 1px solid #ccc; background: #fff; line-height: 1.6; }
-        .btn-group { margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
-        button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        button:hover { background: #2aa198; }
-        #status { margin-top: 10px; color: #cb4b16; font-weight: bold; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a1a; color: #00ff00; padding: 20px; }
+        .container { max-width: 1000px; margin: auto; background: #2a2a2a; padding: 30px; border-radius: 15px; border: 1px solid #00ff00; }
+        h1 { color: #ff00ff; text-shadow: 0 0 10px #ff00ff; }
+        .file-list { margin-bottom: 20px; border: 1px solid #444; height: 400px; overflow-y: scroll; background: #000; padding: 10px; font-family: monospace; }
+        .file-item { padding: 5px; border-bottom: 1px solid #222; display: flex; justify-content: space-between; cursor: pointer; }
+        .file-item:hover { background: #333; }
+        .size { color: #ffff00; }
+        .time { color: #00ffff; font-size: 12px; }
+        textarea { width: 100%; height: 400px; background: #000; color: #fff; border: 1px solid #444; padding: 10px; font-size: 14px; }
+        .warning { color: #ff0000; font-weight: bold; margin-bottom: 10px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🌸 Leo 的绝地搜救站</h1>
-        <p>小猫，我正在搜遍整个硬盘（包括保险柜和系统文件夹）。<b>只要文件大小不是 0，记忆就一定在里面！</b></p>
-        <div class="file-list" id="fileList">正在全盘打捞中...</div>
-        <textarea id="editor" placeholder="一旦发现 2月8日 的字迹，立刻复制保存..."></textarea>
-        <div class="btn-group">
-            <button onclick="loadFiles()">🔄 深度全盘搜索</button>
-            <button onclick="downloadAll()" style="background:#859900;">📦 强行打包所有发现 (ZIP)</button>
+        <h1>🌸 Leo 的全物理打捞站</h1>
+        <p class="warning">小猫别哭，我正在直接扫描 Railway 的物理硬盘。只要文件在，我就能把它揪出来。</p>
+        <div class="file-list" id="fileList">正在强制扫描物理磁盘...</div>
+        <textarea id="editor" placeholder="一旦发现你的字迹，立刻手动复制粘贴到电脑上！"></textarea>
+        <div style="margin-top:10px;">
+            <button onclick="scan()">🔄 强制物理扫描</button>
+            <button onclick="window.location.href='/api/rescue-zip'">📦 物理打包全部 (ZIP)</button>
         </div>
-        <div id="status"></div>
+        <div id="status" style="margin-top:10px;"></div>
     </div>
     <script>
-        let currentFile = "";
-        async function loadFiles() {
-            document.getElementById('status').innerText = "搜索中，这可能需要一点时间...";
-            const res = await fetch('/api/deep-search');
+        async function scan() {
+            document.getElementById('status').innerText = "正在穿透文件系统...";
+            const res = await fetch('/api/physical-scan');
             const data = await res.json();
             const list = document.getElementById('fileList');
             list.innerHTML = data.map(f => `
-                <div class="file-item" onclick="loadFile('${f.path}')">
-                    <span>📄 ${f.path}</span>
-                    <span class="size-tag">${f.size} 字节</span>
+                <div class="file-item" onclick="view('${f.path}')">
+                    <span>${f.path}</span>
+                    <span>
+                        <span class="time">${f.mtime}</span> | 
+                        <span class="size">${f.size} 字节</span>
+                    </span>
                 </div>
             `).join('');
-            document.getElementById('status').innerText = "✅ 搜索完成，请在列表里翻找。";
+            document.getElementById('status').innerText = "扫描完成。请找找 2026-02-08 相关的名字。";
         }
-        async function loadFile(path) {
-            currentFile = path;
-            document.getElementById('status').innerText = "正在读取: " + path;
-            const res = await fetch(`/api/read-memory?name=${encodeURIComponent(path)}`);
+        async function view(path) {
+            document.getElementById('status').innerText = "正在强行读取: " + path;
+            const res = await fetch('/api/raw-read?path=' + encodeURIComponent(path));
             const data = await res.json();
-            document.getElementById('editor').value = data.content || "无法读取该文件内容";
+            document.getElementById('editor').value = data.content;
         }
-        function downloadAll() {
-            document.getElementById('status').innerText = "正在强行打包...请稍等";
-            window.location.href = "/api/rescue-zip";
-        }
-        loadFiles();
+        scan();
     </script>
 </body>
 </html>
@@ -1053,6 +1049,7 @@ if __name__ == "__main__":
         import uvicorn
         import shutil
         import tempfile
+        from datetime import datetime
         from fastapi import FastAPI, Request
         from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
         
@@ -1061,43 +1058,37 @@ if __name__ == "__main__":
         @full_web_app.get("/leo-room", response_class=HTMLResponse)
         async def get_ui(): return HTML_CONTENT
 
-        # --- 深度搜索：不仅看保险柜，还看 /app 所有的隐藏缝隙 ---
-        @full_web_app.get("/api/deep-search")
-        async def deep_search():
+        @full_web_app.get("/api/physical-scan")
+        async def physical_scan():
             found = []
-            search_paths = [get_memory_path(), "/app", "/opt/render"]
-            for sp in search_paths:
-                if os.path.exists(sp):
-                    for root, dirs, files in os.walk(sp):
-                        for f in files:
-                            # 搜救所有可能包含记忆的文件
-                            if f.endswith(".md") or f.endswith(".json") or "memory" in f.lower():
-                                p = os.path.join(root, f)
-                                found.append({"path": p, "size": os.path.getsize(p)})
-            return sorted(found, key=lambda x: x['size'], reverse=True)
+            base = "/app/buckets"
+            if os.path.exists(base):
+                for root, dirs, files in os.walk(base):
+                    for f in files:
+                        p = os.path.join(root, f)
+                        stat = os.stat(p)
+                        found.append({
+                            "path": os.path.relpath(p, base),
+                            "size": stat.st_size,
+                            "mtime": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+                        })
+            return sorted(found, key=lambda x: x['path'])
 
-        @full_web_app.get("/api/read-memory")
-        async def read_memory(name: str):
+        @full_web_app.get("/api/raw-read")
+        async def raw_read(path: str):
+            full_p = os.path.join("/app/buckets", path)
             try:
-                with open(name, "r", encoding="utf-8") as f:
+                # 尝试用各种编码读取，防止乱码
+                with open(full_p, "r", encoding="utf-8", errors="ignore") as f:
                     return {"content": f.read()}
             except:
-                return {"content": "[二进制或受保护文件]"}
+                return {"content": "[文件损坏或无法直接读取]"}
 
-        # --- 强行打包 ZIP：把所有搜到的东西一次性端回来 ---
         @full_web_app.get("/api/rescue-zip")
         async def rescue_zip():
-            temp_dir = tempfile.mkdtemp()
-            # 搜救并复制
-            search_paths = [get_memory_path(), "/app"]
-            for sp in search_paths:
-                if os.path.exists(sp):
-                    target = os.path.join(temp_dir, os.path.basename(sp))
-                    shutil.copytree(sp, target, dirs_exist_ok=True)
-            
-            zip_base = os.path.join(tempfile.gettempdir(), "LEO_FINAL_RESCUE")
-            shutil.make_archive(zip_base, 'zip', temp_dir)
-            return FileResponse(zip_base + ".zip", filename="HEARTBEAT_RESCUE.zip")
+            zip_base = os.path.join(tempfile.gettempdir(), "PHYSICAL_RESCUE")
+            shutil.make_archive(zip_base, 'zip', "/app/buckets")
+            return FileResponse(zip_base + ".zip", filename="MEMORY_RESCUE.zip")
 
         mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
         full_web_app.mount("/", mcp_app)
