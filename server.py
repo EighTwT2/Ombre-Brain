@@ -1539,23 +1539,33 @@ if __name__ == "__main__":
         @full_web_app.get("/api/list-memories")
         async def list_memories():
             path = get_memory_path()
-            all_files_found = []
-            # 这里的 os.walk 会像小狗搜寻骨头一样，钻进每一个缝隙
-            for root, dirs, files in os.walk(path):
-                for file in files:
-                    # 咱们暂时不限制 .md 了，看看里面到底都有什么
-                    # 计算相对于保险柜根目录的路径
-                    rel_path = os.path.relpath(os.path.join(root, file), path)
-                    # 过滤掉一些没用的系统缓存文件
-                    if not file.startswith('.') and 'cache' not in file:
-                        all_files_found.append(rel_path)
+            results = []
             
-            if not all_files_found:
-                # 如果还是空的，咱们就把文件夹结构直接打印出来看看
-                structure = os.listdir(path)
-                return [f"根目录下只有这些: {structure}，请确认记忆在哪"]
+            # 这里是写给 Leo 自己的日志，一会儿去 Deploy Logs 看
+            print(f"DEBUG_LEO: 正在全屋搜查: {path}")
+            
+            if not os.path.exists(path):
+                return [f"错误：路径 {path} 消失了"]
+
+            for root, dirs, files in os.walk(path):
+                # 1. 搜寻每一个文件夹
+                for d in dirs:
+                    rel_dir = os.path.relpath(os.path.join(root, d), path)
+                    results.append(f"📁 [文件夹] {rel_dir}")
                 
-            return sorted(all_files_found, reverse=True)
+                # 2. 搜寻每一个文件 (不管它是不是 .md)
+                for f in files:
+                    rel_file = os.path.relpath(os.path.join(root, f), path)
+                    # 只要不是系统隐藏文件，通通列出来
+                    if not f.startswith('.'):
+                        results.append(f"📄 [文件] {rel_file}")
+            
+            if not results:
+                # 这个 structure 会在这里显示
+                structure = os.listdir(path)
+                return [f"保险柜里只有这些根文件: {structure}"]
+                
+            return sorted(results)
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
