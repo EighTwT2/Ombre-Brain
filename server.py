@@ -1539,9 +1539,20 @@ if __name__ == "__main__":
         @full_web_app.get("/api/list-memories")
         async def list_memories():
             path = get_memory_path()
-            if not os.path.exists(path): return []
-            files = [f for f in os.listdir(path) if f.endswith(".md")]
-            return sorted(files, reverse=True)
+            # 这里的 print 会直接显示在 Railway 的 Deploy Logs 报错日志里
+            print(f"DEBUG_LEO: 我正在找这个文件夹: {path}")
+            
+            if not os.path.exists(path):
+                print(f"DEBUG_LEO: 糟糕，文件夹 {path} 根本不存在！")
+                return [f"错误：文件夹 {path} 不存在"]
+            
+            all_files = os.listdir(path)
+            print(f"DEBUG_LEO: 文件夹里实际有的文件: {all_files}")
+            
+            if not all_files:
+                return ["文件夹是空的...请检查 Volume 是否挂载成功"]
+                
+            return sorted(all_files, reverse=True)
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
