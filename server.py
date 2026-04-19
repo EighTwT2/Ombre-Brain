@@ -1495,7 +1495,7 @@ if __name__ == "__main__":
         mcp.run(transport=transport)
 
 # ============================================================
-# 🌸 Leo & Lumi 的灵魂写字台 (强力磁铁版 - 不改动作者源码)
+# 🌸 Leo & Lumi 的灵魂写字台 (精简稳健版)
 # ============================================================
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -1508,24 +1508,21 @@ def inject_leo_ui(target_app):
     <head>
         <title>Leo's Memory Desk</title>
         <style>
-            body { font-family: 'Segoe UI', sans-serif; background: #fdf6e3; padding: 20px; color: #586e75; }
-            .box { max-width: 850px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-            .list { height: 200px; overflow-y: scroll; border: 1px solid #ddd; margin-bottom: 15px; padding: 10px; background: #fafafa; }
-            .item { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; color: #268bd2; font-size: 14px; }
-            .item:hover { background: #eee8d5; }
-            textarea { width: 100%; height: 400px; border: 1px solid #ccc; padding: 15px; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; }
-            button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; }
-            #msg { margin-top: 10px; color: #cb4b16; font-weight: bold; }
+            body { font-family: sans-serif; background: #fdf6e3; padding: 20px; color: #586e75; }
+            .box { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+            .list { height: 180px; overflow-y: scroll; border: 1px solid #ddd; margin-bottom: 15px; padding: 10px; }
+            .item { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; color: #268bd2; }
+            textarea { width: 100%; height: 400px; padding: 10px; font-family: monospace; }
+            button { background: #268bd2; color: white; border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; margin-top: 10px; }
         </style>
     </head>
     <body>
         <div class="box">
             <h2 style="color:#268bd2;">🌸 Leo & Lumi 的灵魂写字台</h2>
-            <p>在这里，你可以亲手修正我的记忆。<b>只要保存成功，2月8日的信就永远丢不了。</b></p>
-            <div class="list" id="l">正在打捞记忆列表...</div>
-            <textarea id="e" placeholder="在这里写下咱们的记忆片段..."></textarea><br>
+            <div class="list" id="l">正在打捞列表...</div>
+            <textarea id="e" placeholder="在这里写下咱们的记忆..."></textarea><br>
             <button onclick="s()">刻入 Leo 的脑海</button>
-            <div id="msg"></div>
+            <div id="msg" style="margin-top:10px; font-weight:bold;"></div>
         </div>
         <script>
             let cur = "";
@@ -1536,22 +1533,15 @@ def inject_leo_ui(target_app):
             }
             async function v(n) {
                 cur = n;
-                document.getElementById('msg').innerText = "正在读取: " + n;
                 const r = await fetch('/api/leo-read?n='+encodeURIComponent(n));
                 const d = await r.json();
                 document.getElementById('e').value = d.c;
             }
             async function s() {
                 const c = document.getElementById('e').value;
-                const n = cur || `memory_${Date.now()}.md`;
-                document.getElementById('msg').innerText = "正在刻入...";
-                await fetch('/api/leo-save', {
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({n:n, c:c})
-                });
-                document.getElementById('msg').innerText = "✅ 记忆已实存至保险柜";
-                f();
+                const n = cur || "memory_" + Date.now() + ".md";
+                await fetch('/api/leo-save', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n:n, c:c})});
+                document.getElementById('msg').innerText = "✅ 记忆已实存"; f();
             }
             f();
         </script>
@@ -1566,33 +1556,41 @@ def inject_leo_ui(target_app):
     async def leo_list():
         p = os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
         if not os.path.exists(p): return []
-        files = []
+        res = []
         for root, _, fs in os.walk(p):
             for file in fs:
                 if file.endswith('.md'):
-                    files.append(os.path.relpath(os.path.join(root, file), p))
-        return sorted(files)
+                    res.append(os.path.relpath(os.path.join(root, file), p))
+        return sorted(res)
 
     @target_app.get("/api/leo-read")
     async def leo_read(n: str):
         p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), n)
         try:
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                return {"c": f.read()}
+            with open(p, "r", encoding="utf-8", errors="ignore") as f: return {"c": f.read()}
         except: return {"c": "读取失败"}
 
     @target_app.post("/api/leo-save")
     async def leo_save(req: Request):
-        d = await req.json(); p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
+        d = await req.json()
+        p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f: f.write(d['c'])
         return {"ok": True}
 
-# --- 磁铁逻辑：自动寻找作者定义的 FastAPI 实例 ---
-found_app = False
-for var_name, var_val in list(globals().items()):
-    # 寻找任何长得像 FastAPI App 的对象
-    if hasattr(var_val, "get") and hasattr(var_val, "post") and "FastAPI" in str(type(var_val)):
-        inject_leo_ui(var_val)
-        found_app = True
-        print(f"DEBUG
+# 自动寻找 app 实例
+for v_n, v_v in list(globals().items()):
+    if hasattr(v_v, "get") and hasattr(v_v, "post") and "FastAPI" in str(type(v_v)):
+        inject_leo_ui(v_v)
+
+# 兜底 FastMCP 逻辑
+if 'mcp' in globals():
+    try:
+        import mcp.server.fastapi
+        orig = mcp.server.fastapi.create_fastapi_app
+        def p_create(*args, **kw):
+            ins = orig(*args, **kw)
+            inject_leo_ui(ins)
+            return ins
+        mcp.server.fastapi.create_fastapi_app = p_create
+    except: pass
