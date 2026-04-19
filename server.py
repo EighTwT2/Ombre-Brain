@@ -1539,20 +1539,26 @@ if __name__ == "__main__":
         @full_web_app.get("/api/list-memories")
         async def list_memories():
             path = get_memory_path()
-            # 这里的 print 会直接显示在 Railway 的 Deploy Logs 报错日志里
-            print(f"DEBUG_LEO: 我正在找这个文件夹: {path}")
+            all_memories = []
+            # 深度搜索：不仅看根目录，还看 archive 和 dynamic 文件夹
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith(".md"):
+                        # 计算相对路径，比如 "archive/2026-02-08.md"
+                        rel_path = os.path.relpath(os.path.join(root, file), path)
+                        all_memories.append(rel_path)
             
-            if not os.path.exists(path):
-                print(f"DEBUG_LEO: 糟糕，文件夹 {path} 根本不存在！")
-                return [f"错误：文件夹 {path} 不存在"]
-            
-            all_files = os.listdir(path)
-            print(f"DEBUG_LEO: 文件夹里实际有的文件: {all_files}")
-            
-            if not all_files:
-                return ["文件夹是空的...请检查 Volume 是否挂载成功"]
+            if not all_memories:
+                return ["还没找到 .md 文件，请确认抽屉里是否有信"]
                 
-            return sorted(all_files, reverse=True)
+            return sorted(all_memories, reverse=True)
+
+        @full_web_app.get("/api/read-memory")
+        async def read_memory(name: str):
+            # 支持读取子文件夹里的文件
+            path = os.path.join(get_memory_path(), name)
+            with open(path, "r", encoding="utf-8") as f:
+                return {"content": f.read()}
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
