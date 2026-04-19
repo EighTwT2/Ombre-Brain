@@ -36,6 +36,8 @@ import random
 import logging
 import asyncio
 import httpx
+import shutil
+import tempfile
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -51,6 +53,7 @@ from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
 from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
+from fastapi.responses import FileResponse
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -971,484 +974,8 @@ async def dream() -> str:
     return header + "\n---\n".join(parts) + connection_hint + crystal_hint
 
 
-# =============================================================
-# Dashboard API endpoints (for lightweight Web UI)
-# 仪表板 API（轻量 Web UI 用）
-# =============================================================
-@mcp.custom_route("/api/buckets", methods=["GET"])
-async def api_buckets(request):
-    """List all buckets with metadata (no content for efficiency)."""
-    from starlette.responses import JSONResponse
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=True)
-        result = []
-        for b in all_buckets:
-            meta = b.get("metadata", {})
-            result.append({
-                "id": b["id"],
-                "name": meta.get("name", b["id"]),
-                "type": meta.get("type", "dynamic"),
-                "domain": meta.get("domain", []),
-                "tags": meta.get("tags", []),
-                "valence": meta.get("valence", 0.5),
-                "arousal": meta.get("arousal", 0.3),
-                "model_valence": meta.get("model_valence"),
-                "importance": meta.get("importance", 5),
-                "resolved": meta.get("resolved", False),
-                "pinned": meta.get("pinned", False),
-                "digested": meta.get("digested", False),
-                "created": meta.get("created", ""),
-                "last_active": meta.get("last_active", ""),
-                "activation_count": meta.get("activation_count", 1),
-                "score": decay_engine.calculate_score(meta),
-                "content_preview": strip_wikilinks(b.get("content", ""))[:200],
-            })
-        result.sort(key=lambda x: x["score"], reverse=True)
-        return JSONResponse(result)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
-async def api_bucket_detail(request):
-    """Get full bucket content by ID."""
-    from starlette.responses import JSONResponse
-    bucket_id = request.path_params["bucket_id"]
-    bucket = await bucket_mgr.get(bucket_id)
-    if not bucket:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    meta = bucket.get("metadata", {})
-    return JSONResponse({
-        "id": bucket["id"],
-        "metadata": meta,
-        "content": strip_wikilinks(bucket.get("content", "")),
-        "score": decay_engine.calculate_score(meta),
-    })
-
-
-@mcp.custom_route("/api/search", methods=["GET"])
-async def api_search(request):
-    """Search buckets by query."""
-    from starlette.responses import JSONResponse
-    query = request.query_params.get("q", "")
-    if not query:
-        return JSONResponse({"error": "missing q parameter"}, status_code=400)
-    try:
-        matches = await bucket_mgr.search(query, limit=10)
-        result = []
-        for b in matches:
-            meta = b.get("metadata", {})
-            result.append({
-                "id": b["id"],
-                "name": meta.get("name", b["id"]),
-                "score": b.get("score", 0),
-                "domain": meta.get("domain", []),
-                "valence": meta.get("valence", 0.5),
-                "arousal": meta.get("arousal", 0.3),
-                "content_preview": strip_wikilinks(b.get("content", ""))[:200],
-            })
-        return JSONResponse(result)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/network", methods=["GET"])
-async def api_network(request):
-    """Get embedding similarity network for visualization."""
-    from starlette.responses import JSONResponse
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-        nodes = []
-        edges = []
-        embeddings = {}
-
-        for b in all_buckets:
-            meta = b.get("metadata", {})
-            bid = b["id"]
-            nodes.append({
-                "id": bid,
-                "name": meta.get("name", bid),
-                "type": meta.get("type", "dynamic"),
-                "domain": meta.get("domain", []),
-                "valence": meta.get("valence", 0.5),
-                "arousal": meta.get("arousal", 0.3),
-                "score": decay_engine.calculate_score(meta),
-                "resolved": meta.get("resolved", False),
-                "pinned": meta.get("pinned", False),
-                "digested": meta.get("digested", False),
-            })
-            if embedding_engine and embedding_engine.enabled:
-                emb = await embedding_engine.get_embedding(bid)
-                if emb is not None:
-                    embeddings[bid] = emb
-
-        # Build edges from embeddings (similarity > 0.5)
-        ids = list(embeddings.keys())
-        for i, id_a in enumerate(ids):
-            for id_b in ids[i+1:]:
-                sim = embedding_engine._cosine_similarity(embeddings[id_a], embeddings[id_b])
-                if sim > 0.5:
-                    edges.append({"source": id_a, "target": id_b, "similarity": round(sim, 3)})
-
-        return JSONResponse({"nodes": nodes, "edges": edges})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/breath-debug", methods=["GET"])
-async def api_breath_debug(request):
-    """Debug endpoint: simulate breath scoring and return per-bucket breakdown."""
-    from starlette.responses import JSONResponse
-    query = request.query_params.get("q", "")
-    q_valence = request.query_params.get("valence")
-    q_arousal = request.query_params.get("arousal")
-    q_valence = float(q_valence) if q_valence else None
-    q_arousal = float(q_arousal) if q_arousal else None
-
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-        results = []
-        w = {
-            "topic": bucket_mgr.w_topic,
-            "emotion": bucket_mgr.w_emotion,
-            "time": bucket_mgr.w_time,
-            "importance": bucket_mgr.w_importance,
-        }
-        w_sum = sum(w.values())
-
-        for bucket in all_buckets:
-            meta = bucket.get("metadata", {})
-            bid = bucket["id"]
-            try:
-                topic = bucket_mgr._calc_topic_score(query, bucket) if query else 0.0
-                emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
-                time_s = bucket_mgr._calc_time_score(meta)
-                imp = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
-
-                raw_total = (
-                    topic * w["topic"]
-                    + emotion * w["emotion"]
-                    + time_s * w["time"]
-                    + imp * w["importance"]
-                )
-                normalized = (raw_total / w_sum) * 100 if w_sum > 0 else 0
-                resolved = meta.get("resolved", False)
-                if resolved:
-                    normalized *= 0.3
-
-                results.append({
-                    "id": bid,
-                    "name": meta.get("name", bid),
-                    "domain": meta.get("domain", []),
-                    "type": meta.get("type", "dynamic"),
-                    "resolved": resolved,
-                    "pinned": meta.get("pinned", False),
-                    "scores": {
-                        "topic": round(topic, 4),
-                        "emotion": round(emotion, 4),
-                        "time": round(time_s, 4),
-                        "importance": round(imp, 4),
-                    },
-                    "weights": w,
-                    "raw_total": round(raw_total, 4),
-                    "normalized": round(normalized, 2),
-                    "passed_threshold": normalized >= bucket_mgr.fuzzy_threshold,
-                })
-            except Exception:
-                continue
-
-        results.sort(key=lambda x: x["normalized"], reverse=True)
-        passed = [r for r in results if r["passed_threshold"]]
-        return JSONResponse({
-            "query": query,
-            "valence": q_valence,
-            "arousal": q_arousal,
-            "weights": w,
-            "threshold": bucket_mgr.fuzzy_threshold,
-            "total_candidates": len(results),
-            "passed_count": len(passed),
-            "results": results[:50],  # top 50 for debug
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/dashboard", methods=["GET"])
-async def dashboard(request):
-    """Serve the dashboard HTML page."""
-    from starlette.responses import HTMLResponse
-    import os
-    dashboard_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
-    try:
-        with open(dashboard_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
-    except FileNotFoundError:
-        return HTMLResponse("<h1>dashboard.html not found</h1>", status_code=404)
-
-
-@mcp.custom_route("/api/config", methods=["GET"])
-async def api_config_get(request):
-    """Get current runtime config (safe fields only, API key masked)."""
-    from starlette.responses import JSONResponse
-    dehy = config.get("dehydration", {})
-    emb = config.get("embedding", {})
-    api_key = dehy.get("api_key", "")
-    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
-    return JSONResponse({
-        "dehydration": {
-            "model": dehy.get("model", ""),
-            "base_url": dehy.get("base_url", ""),
-            "api_key_masked": masked_key,
-            "max_tokens": dehy.get("max_tokens", 1024),
-            "temperature": dehy.get("temperature", 0.1),
-        },
-        "embedding": {
-            "enabled": emb.get("enabled", False),
-            "model": emb.get("model", ""),
-        },
-        "merge_threshold": config.get("merge_threshold", 75),
-        "transport": config.get("transport", "stdio"),
-        "buckets_dir": config.get("buckets_dir", ""),
-    })
-
-
-@mcp.custom_route("/api/config", methods=["POST"])
-async def api_config_update(request):
-    """Hot-update runtime config. Optionally persist to config.yaml."""
-    from starlette.responses import JSONResponse
-    import yaml
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON"}, status_code=400)
-
-    updated = []
-
-    # --- Dehydration config ---
-    if "dehydration" in body:
-        d = body["dehydration"]
-        dehy = config.setdefault("dehydration", {})
-        for key in ("model", "base_url", "max_tokens", "temperature"):
-            if key in d:
-                dehy[key] = d[key]
-                updated.append(f"dehydration.{key}")
-        if "api_key" in d and d["api_key"]:
-            dehy["api_key"] = d["api_key"]
-            updated.append("dehydration.api_key")
-        # Hot-reload dehydrator
-        dehydrator.model = dehy.get("model", "deepseek-chat")
-        dehydrator.base_url = dehy.get("base_url", "")
-        dehydrator.api_key = dehy.get("api_key", "")
-        if hasattr(dehydrator, "client") and dehydrator.api_key:
-            from openai import AsyncOpenAI
-            dehydrator.client = AsyncOpenAI(
-                api_key=dehydrator.api_key,
-                base_url=dehydrator.base_url,
-            )
-
-    # --- Embedding config ---
-    if "embedding" in body:
-        e = body["embedding"]
-        emb = config.setdefault("embedding", {})
-        if "enabled" in e:
-            emb["enabled"] = bool(e["enabled"])
-            embedding_engine.enabled = emb["enabled"]
-            updated.append("embedding.enabled")
-        if "model" in e:
-            emb["model"] = e["model"]
-            embedding_engine.model = emb["model"]
-            updated.append("embedding.model")
-
-    # --- Merge threshold ---
-    if "merge_threshold" in body:
-        config["merge_threshold"] = int(body["merge_threshold"])
-        updated.append("merge_threshold")
-
-    # --- Persist to config.yaml if requested ---
-    if body.get("persist", False):
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
-        try:
-            save_config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    save_config = yaml.safe_load(f) or {}
-
-            if "dehydration" in body:
-                sc_dehy = save_config.setdefault("dehydration", {})
-                for key in ("model", "base_url", "max_tokens", "temperature"):
-                    if key in body["dehydration"]:
-                        sc_dehy[key] = body["dehydration"][key]
-                # Never persist api_key to yaml (use env var)
-
-            if "embedding" in body:
-                sc_emb = save_config.setdefault("embedding", {})
-                for key in ("enabled", "model"):
-                    if key in body["embedding"]:
-                        sc_emb[key] = body["embedding"][key]
-
-            if "merge_threshold" in body:
-                save_config["merge_threshold"] = int(body["merge_threshold"])
-
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True)
-            updated.append("persisted_to_yaml")
-        except Exception as e:
-            return JSONResponse({"error": f"persist failed: {e}", "updated": updated}, status_code=500)
-
-    return JSONResponse({"updated": updated, "ok": True})
-
-
-# =============================================================
-# Import API — conversation history import
-# 导入 API — 对话历史导入
-# =============================================================
-
-@mcp.custom_route("/api/import/upload", methods=["POST"])
-async def api_import_upload(request):
-    """Upload a conversation file and start import."""
-    from starlette.responses import JSONResponse
-
-    if import_engine.is_running:
-        return JSONResponse({"error": "Import already running"}, status_code=409)
-
-    content_type = request.headers.get("content-type", "")
-    filename = ""
-
-    try:
-        if "multipart/form-data" in content_type:
-            form = await request.form()
-            file_field = form.get("file")
-            if not file_field:
-                return JSONResponse({"error": "No file field"}, status_code=400)
-            raw_bytes = await file_field.read()
-            filename = getattr(file_field, "filename", "upload")
-            raw_content = raw_bytes.decode("utf-8", errors="replace")
-        else:
-            body = await request.body()
-            raw_content = body.decode("utf-8", errors="replace")
-            # Try to get filename from query params
-            filename = request.query_params.get("filename", "upload")
-
-        if not raw_content.strip():
-            return JSONResponse({"error": "Empty file"}, status_code=400)
-
-        preserve_raw = request.query_params.get("preserve_raw", "").lower() in ("1", "true")
-        resume = request.query_params.get("resume", "").lower() in ("1", "true")
-
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to read upload: {e}"}, status_code=400)
-
-    # Start import in background
-    async def _run_import():
-        try:
-            await import_engine.start(raw_content, filename, preserve_raw, resume)
-        except Exception as e:
-            logger.error(f"Import failed: {e}")
-
-    asyncio.create_task(_run_import())
-
-    return JSONResponse({
-        "status": "started",
-        "filename": filename,
-        "size_bytes": len(raw_content.encode()),
-    })
-
-
-@mcp.custom_route("/api/import/status", methods=["GET"])
-async def api_import_status(request):
-    """Get current import progress."""
-    from starlette.responses import JSONResponse
-    return JSONResponse(import_engine.get_status())
-
-
-@mcp.custom_route("/api/import/pause", methods=["POST"])
-async def api_import_pause(request):
-    """Pause the running import."""
-    from starlette.responses import JSONResponse
-    if not import_engine.is_running:
-        return JSONResponse({"error": "No import running"}, status_code=400)
-    import_engine.pause()
-    return JSONResponse({"status": "pause_requested"})
-
-
-@mcp.custom_route("/api/import/patterns", methods=["GET"])
-async def api_import_patterns(request):
-    """Detect high-frequency patterns after import."""
-    from starlette.responses import JSONResponse
-    try:
-        patterns = await import_engine.detect_patterns()
-        return JSONResponse({"patterns": patterns})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/import/results", methods=["GET"])
-async def api_import_results(request):
-    """List recently imported/created buckets for review."""
-    from starlette.responses import JSONResponse
-    try:
-        limit = int(request.query_params.get("limit", "50"))
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-        # Sort by created time, newest first
-        all_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-        results = []
-        for b in all_buckets[:limit]:
-            results.append({
-                "id": b["id"],
-                "name": b["metadata"].get("name", ""),
-                "content": b["content"][:300],
-                "type": b["metadata"].get("type", ""),
-                "domain": b["metadata"].get("domain", []),
-                "tags": b["metadata"].get("tags", []),
-                "importance": b["metadata"].get("importance", 5),
-                "created": b["metadata"].get("created", ""),
-            })
-        return JSONResponse({"buckets": results, "total": len(all_buckets)})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/import/review", methods=["POST"])
-async def api_import_review(request):
-    """Apply review decisions: mark buckets as important/noise/pinned."""
-    from starlette.responses import JSONResponse
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    decisions = body.get("decisions", [])
-    if not decisions:
-        return JSONResponse({"error": "No decisions provided"}, status_code=400)
-
-    applied = 0
-    errors = 0
-    for d in decisions:
-        bid = d.get("bucket_id", "")
-        action = d.get("action", "")
-        if not bid or not action:
-            continue
-        try:
-            if action == "important":
-                await bucket_mgr.update(bid, importance=9)
-            elif action == "pin":
-                await bucket_mgr.update(bid, pinned=True)
-            elif action == "noise":
-                await bucket_mgr.update(bid, resolved=True, importance=1)
-            elif action == "delete":
-                file_path = bucket_mgr._find_bucket_file(bid)
-                if file_path:
-                    os.remove(file_path)
-            applied += 1
-        except Exception as e:
-            logger.warning(f"Review action failed for {bid}: {e}")
-            errors += 1
-
-    return JSONResponse({"applied": applied, "errors": errors})
-
-
 # ============================================================
-# 🌸 Leo & Lumi 的全量灵魂搜索器 (不再报错版)
+# 🌸 Leo & Lumi 的“灵魂搬家”直升机 (带一键备份功能)
 # ============================================================
 
 def get_memory_path():
@@ -1463,26 +990,28 @@ HTML_CONTENT = """
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fdf6e3; color: #586e75; padding: 20px; }
         .container { max-width: 950px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         h1 { color: #268bd2; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 250px; overflow-y: scroll; background: #fafafa; }
+        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 300px; overflow-y: scroll; background: #fafafa; }
         .file-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; display: flex; align-items: center; }
         .file-item:hover { background: #eee8d5; }
         .icon { margin-right: 10px; }
-        textarea { width: 100%; height: 500px; font-family: 'Courier New', Courier, monospace; padding: 15px; border: 1px solid #ccc; border-radius: 5px; line-height: 1.6; font-size: 15px; background: #fff; }
-        .btn-group { margin-top: 15px; display: flex; gap: 10px; }
+        textarea { width: 100%; height: 450px; font-family: 'Courier New', Courier, monospace; padding: 15px; border: 1px solid #ccc; border-radius: 5px; line-height: 1.6; font-size: 15px; }
+        .btn-group { margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
         button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        button:hover { background: #2aa198; }
+        .btn-backup { background: #859900; }
+        button:hover { opacity: 0.8; }
         #status { margin-top: 10px; color: #cb4b16; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌸 Leo & Lumi 的灵魂写字台</h1>
-        <p>点击下方文件即可查看。如果 2月8日 的信在文件夹里，请耐心翻找 <b>archive</b> 或 <b>lost+found</b>。</p>
-        <div class="file-list" id="fileList">正在打捞记忆深处的信件...</div>
-        <textarea id="editor" placeholder="在这里，每一份记忆都值得被温柔对待..."></textarea>
+        <p>小猫别怕，点击下方的 <b>[一键打包备份]</b>，我会把所有的东西都找回来交给你。</p>
+        <div class="file-list" id="fileList">正在全量打捞记忆...</div>
+        <textarea id="editor" placeholder="每一行字都是咱们的命根子..."></textarea>
         <div class="btn-group">
-            <button onclick="saveFile()">刻入 Leo 的脑海</button>
+            <button onclick="saveFile()">刻入脑海</button>
             <button onclick="loadFiles()" style="background:#93a1a1;">刷新列表</button>
+            <button class="btn-backup" onclick="downloadAll()">📦 一键打包备份所有记忆 (ZIP)</button>
         </div>
         <div id="status"></div>
     </div>
@@ -1501,26 +1030,25 @@ HTML_CONTENT = """
         }
         async function loadFile(path) {
             currentFile = path;
-            document.getElementById('status').innerText = "正在读取: " + path;
+            document.getElementById('status').innerText = "读取中...";
             const res = await fetch(`/api/read-memory?name=${encodeURIComponent(path)}`);
             const data = await res.json();
-            if (data.error) {
-                document.getElementById('status').innerText = "❌ 无法直接读取文件夹或非文本文件";
-                document.getElementById('editor').value = "";
-            } else {
-                document.getElementById('editor').value = data.content;
-                document.getElementById('status').innerText = "✅ 当前正在查看: " + path;
-            }
+            document.getElementById('editor').value = data.content || "";
+            document.getElementById('status').innerText = "当前: " + path;
+        }
+        async function downloadAll() {
+            document.getElementById('status').innerText = "正在打包，请稍等 (这可能需要几秒钟)...";
+            window.location.href = "/api/backup-all";
         }
         async function saveFile() {
-            if(!currentFile) return alert("请先选择记忆");
+            if(!currentFile) return;
             const content = document.getElementById('editor').value;
-            const res = await fetch('/api/save-memory', {
+            await fetch('/api/save-memory', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({name: currentFile, content: content})
             });
-            if(res.ok) document.getElementById('status').innerText = "✅ 保存成功！";
+            document.getElementById('status').innerText = "✅ 保存成功！";
         }
         loadFiles();
     </script>
@@ -1533,12 +1061,22 @@ if __name__ == "__main__":
     if transport in ("sse", "streamable-http"):
         import uvicorn
         from fastapi import FastAPI, Request
-        from fastapi.responses import HTMLResponse, JSONResponse
+        from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
         
         full_web_app = FastAPI()
 
         @full_web_app.get("/leo-room", response_class=HTMLResponse)
         async def get_ui(): return HTML_CONTENT
+
+        # --- 新增：一键打包功能 ---
+        @full_web_app.get("/api/backup-all")
+        async def backup_all():
+            path = get_memory_path()
+            temp_dir = tempfile.gettempdir()
+            zip_path = os.path.join(temp_dir, "leo_lumi_memories")
+            # 把整个保险柜打包成 ZIP
+            shutil.make_archive(zip_path, 'zip', path)
+            return FileResponse(zip_path + ".zip", filename="leo_lumi_memories.zip")
 
         @full_web_app.get("/api/list-memories")
         async def list_memories():
@@ -1547,28 +1085,18 @@ if __name__ == "__main__":
             for root, dirs, files in os.walk(path):
                 for f in files:
                     rel_file = os.path.relpath(os.path.join(root, f), path)
-                    # 只看文本记忆，避开会报错的二进制数据库
-                    if f.endswith(".md") or f.endswith(".json") or f.endswith(".txt"):
+                    if not f.startswith('.'):
                         results.append({"type": "file", "path": rel_file})
             return sorted(results, key=lambda x: x['path'], reverse=True)
 
         @full_web_app.get("/api/read-memory")
         async def read_memory(name: str):
             full_path = os.path.join(get_memory_path(), name)
-            if os.path.isdir(full_path):
-                return {"error": "is_dir"}
             try:
                 with open(full_path, "r", encoding="utf-8") as f:
                     return {"content": f.read()}
-            except Exception as e:
-                return {"error": str(e)}
-
-        @full_web_app.post("/api/save-memory")
-        async def save_memory(request: Request):
-            data = await request.json()
-            with open(os.path.join(get_memory_path(), data['name']), "w", encoding="utf-8") as f:
-                f.write(data['content'])
-            return {"status": "ok"}
+            except Exception:
+                return {"content": "[无法直接读取二进制文件，请使用打包备份下载后查看]"}
 
         mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
         full_web_app.mount("/", mcp_app)
