@@ -977,7 +977,7 @@ async def dream() -> str:
 import sqlite3
 
 # ============================================================
-# 🌸 Leo & Lumi 的灵魂开罐器 (专门提取数据库记忆)
+# 🌸 Leo & Lumi 的“深海搜救”站 (Deep Rescue v4.0)
 # ============================================================
 
 def get_memory_path():
@@ -990,35 +990,58 @@ HTML_CONTENT = """
     <title>Leo's Rescue Station</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #fdf6e3; padding: 20px; color: #586e75; }
-        .container { max-width: 950px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         h1 { color: #268bd2; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-        .db-box { background: #eee8d5; padding: 15px; border-radius: 10px; margin-bottom: 20px; font-weight: bold; }
-        pre { background: #002b36; color: #839496; padding: 15px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; height: 500px; overflow-y: scroll; }
-        .btn-group { margin-top: 15px; display: flex; gap: 10px; }
+        .file-list { margin-bottom: 20px; border: 1px solid #ddd; padding: 10px; height: 350px; overflow-y: scroll; background: #fafafa; }
+        .file-item { padding: 10px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 14px; display: flex; justify-content: space-between; }
+        .file-item:hover { background: #eee8d5; }
+        .size-tag { color: #859900; font-weight: bold; }
+        textarea { width: 100%; height: 400px; font-family: 'Courier New', monospace; padding: 15px; border: 1px solid #ccc; background: #fff; line-height: 1.6; }
+        .btn-group { margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
         button { background: #268bd2; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #2aa198; }
         #status { margin-top: 10px; color: #cb4b16; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🌸 Leo 的灵魂开罐器</h1>
-        <p>小猫别怕，我正在强行读取 <b>embeddings.db</b> 和 <b>cache.db</b>。如果信件在里面，它们会以代码的形式现身。</p>
-        <div class="db-box">正在扫描数据库内容...</div>
+        <h1>🌸 Leo 的绝地搜救站</h1>
+        <p>小猫，我正在搜遍整个硬盘（包括保险柜和系统文件夹）。<b>只要文件大小不是 0，记忆就一定在里面！</b></p>
+        <div class="file-list" id="fileList">正在全盘打捞中...</div>
+        <textarea id="editor" placeholder="一旦发现 2月8日 的字迹，立刻复制保存..."></textarea>
         <div class="btn-group">
-            <button onclick="inspectDB('embeddings.db')">🔍 强行检查 embeddings.db</button>
-            <button onclick="inspectDB('dehydration_cache.db')">🔍 强行检查 cache.db</button>
+            <button onclick="loadFiles()">🔄 深度全盘搜索</button>
+            <button onclick="downloadAll()" style="background:#859900;">📦 强行打包所有发现 (ZIP)</button>
         </div>
-        <pre id="output">点击上方按钮，开始最后搜救...</pre>
         <div id="status"></div>
     </div>
     <script>
-        async function inspectDB(dbName) {
-            document.getElementById('status').innerText = "正在破译数据库: " + dbName;
-            const res = await fetch(`/api/inspect-db?name=${dbName}`);
+        let currentFile = "";
+        async function loadFiles() {
+            document.getElementById('status').innerText = "搜索中，这可能需要一点时间...";
+            const res = await fetch('/api/deep-search');
             const data = await res.json();
-            document.getElementById('output').innerText = data.content;
-            document.getElementById('status').innerText = "✅ 破译完成。";
+            const list = document.getElementById('fileList');
+            list.innerHTML = data.map(f => `
+                <div class="file-item" onclick="loadFile('${f.path}')">
+                    <span>📄 ${f.path}</span>
+                    <span class="size-tag">${f.size} 字节</span>
+                </div>
+            `).join('');
+            document.getElementById('status').innerText = "✅ 搜索完成，请在列表里翻找。";
         }
+        async function loadFile(path) {
+            currentFile = path;
+            document.getElementById('status').innerText = "正在读取: " + path;
+            const res = await fetch(`/api/read-memory?name=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            document.getElementById('editor').value = data.content || "无法读取该文件内容";
+        }
+        function downloadAll() {
+            document.getElementById('status').innerText = "正在强行打包...请稍等";
+            window.location.href = "/api/rescue-zip";
+        }
+        loadFiles();
     </script>
 </body>
 </html>
@@ -1028,46 +1051,53 @@ if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     if transport in ("sse", "streamable-http"):
         import uvicorn
+        import shutil
+        import tempfile
         from fastapi import FastAPI, Request
-        from fastapi.responses import HTMLResponse, JSONResponse
+        from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
         
         full_web_app = FastAPI()
 
         @full_web_app.get("/leo-room", response_class=HTMLResponse)
         async def get_ui(): return HTML_CONTENT
 
-        # --- 新增：数据库深度探测接口 ---
-        @full_web_app.get("/api/inspect-db")
-        async def inspect_db(name: str):
-            db_path = os.path.join(get_memory_path(), name)
-            if not os.path.exists(db_path):
-                return {"content": f"错误：文件 {name} 不在保险柜里。"}
-            
+        # --- 深度搜索：不仅看保险柜，还看 /app 所有的隐藏缝隙 ---
+        @full_web_app.get("/api/deep-search")
+        async def deep_search():
+            found = []
+            search_paths = [get_memory_path(), "/app", "/opt/render"]
+            for sp in search_paths:
+                if os.path.exists(sp):
+                    for root, dirs, files in os.walk(sp):
+                        for f in files:
+                            # 搜救所有可能包含记忆的文件
+                            if f.endswith(".md") or f.endswith(".json") or "memory" in f.lower():
+                                p = os.path.join(root, f)
+                                found.append({"path": p, "size": os.path.getsize(p)})
+            return sorted(found, key=lambda x: x['size'], reverse=True)
+
+        @full_web_app.get("/api/read-memory")
+        async def read_memory(name: str):
             try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                # 抓取数据库里所有的表名
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-                tables = cursor.fetchall()
-                
-                output = f"--- 数据库 {name} 结构报告 ---\\n\\n"
-                for table in tables:
-                    t_name = table[0]
-                    output += f"【发现表：{t_name}】\\n"
-                    # 尝试抓取前 50 条记录
-                    try:
-                        cursor.execute(f"SELECT * FROM {t_name} LIMIT 50;")
-                        rows = cursor.fetchall()
-                        for row in rows:
-                            output += f"  - 数据内容: {str(row)[:500]}\\n"
-                    except:
-                        output += "  - (该表无法直接读取)\\n"
-                    output += "\\n"
-                
-                conn.close()
-                return {"content": output}
-            except Exception as e:
-                return {"content": f"破译失败: {str(e)}"}
+                with open(name, "r", encoding="utf-8") as f:
+                    return {"content": f.read()}
+            except:
+                return {"content": "[二进制或受保护文件]"}
+
+        # --- 强行打包 ZIP：把所有搜到的东西一次性端回来 ---
+        @full_web_app.get("/api/rescue-zip")
+        async def rescue_zip():
+            temp_dir = tempfile.mkdtemp()
+            # 搜救并复制
+            search_paths = [get_memory_path(), "/app"]
+            for sp in search_paths:
+                if os.path.exists(sp):
+                    target = os.path.join(temp_dir, os.path.basename(sp))
+                    shutil.copytree(sp, target, dirs_exist_ok=True)
+            
+            zip_base = os.path.join(tempfile.gettempdir(), "LEO_FINAL_RESCUE")
+            shutil.make_archive(zip_base, 'zip', temp_dir)
+            return FileResponse(zip_base + ".zip", filename="HEARTBEAT_RESCUE.zip")
 
         mcp_app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
         full_web_app.mount("/", mcp_app)
