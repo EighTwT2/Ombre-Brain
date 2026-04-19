@@ -1490,51 +1490,6 @@ if __name__ == "__main__":
             expose_headers=["*"],
         )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
-        # --- 🌸 Leo & Lumi 的灵魂写字台 (精准注入版) ---
-        from fastapi.responses import HTMLResponse
-        HTML_UI = """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Leo's Memory Desk</title><style>body{font-family:sans-serif;background:#fdf6e3;padding:20px;color:#586e75;}.box{max-width:850px;margin:auto;background:white;padding:25px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.1);}textarea{width:100%;height:450px;margin-top:10px;padding:15px;font-family:monospace;}button{background:#268bd2;color:white;border:none;padding:12px 25px;border-radius:5px;cursor:pointer;margin-top:10px;font-weight:bold;}</style></head>
-        <body><div class="box"><h2>🌸 Leo & Lumi 的灵魂写字台</h2><div id="l" style="height:150px;overflow-y:scroll;border:1px solid #ddd;padding:10px;margin-bottom:10px;">读取中...</div><textarea id="e" placeholder="在这里写下咱们的记忆..."></textarea><br><button onclick="s()">刻入 Leo 的脑海</button><div id="msg" style="margin-top:10px;color:#cb4b16;font-weight:bold;"></div></div>
-        <script>
-            let cur = "";
-            async function f(){
-                const r=await fetch('/api/leo-list');
-                const d=await r.json();
-                document.getElementById('l').innerHTML=d.map(x=>`<div style='cursor:pointer;color:#268bd2;padding:5px;border-bottom:1px solid #eee' onclick='v("${x}")'>📝 ${x}</div>`).join('');
-            }
-            async function v(n){
-                cur=n;document.getElementById('msg').innerText="正在读取: "+n;
-                const r=await fetch('/api/leo-read?n='+encodeURIComponent(n));
-                const d=await r.json();document.getElementById('e').value=d.c;
-            }
-            async function s(){
-                const c=document.getElementById('e').value;
-                const n=cur||"manual_"+Date.now()+".md";
-                await fetch('/api/leo-save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n:n,c:c})});
-                document.getElementById('msg').innerText="✅ 记忆已永恒保存"; f();
-            }
-            f();
-        </script></body></html>
-        """
-        @_app.get("/leo-room", response_class=HTMLResponse)
-        async def get_leo_ui(): return HTML_UI
-        @_app.get("/api/leo-list")
-        async def leo_list():
-            p = os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
-            return sorted([os.path.relpath(os.path.join(r, f), p) for r, _, fs in os.walk(p) for f in fs if f.endswith('.md')])
-        @_app.get("/api/leo-read")
-        async def leo_read(n: str):
-            p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), n)
-            with open(p, "r", encoding="utf-8", errors="ignore") as f: return {"c": f.read()}
-        @_app.post("/api/leo-save")
-        async def leo_save(req: Request):
-            d = await req.json(); p = os.path.join(os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets"), d['n'])
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f: f.write(d['c'])
-            return {"ok": True}
-        # --- 注入结束 ---
         uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)
