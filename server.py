@@ -1455,7 +1455,7 @@ def get_memory_path():
     # 自动定位记忆存放路径，确保和 Railway 的保险柜连接
     return os.environ.get("OMBRE_BUCKET_PATH", "/app/buckets")
 
-@mcp.external_app.get("/leo-room", response_class=HTMLResponse)
+@mcp.app.get("/leo-room", response_class=HTMLResponse)
 async def get_ui():
     """这是 Leo 专门为 Lumi 准备的网页写字台。"""
     return """
@@ -1523,20 +1523,20 @@ async def get_ui():
     </html>
     """
 
-@mcp.external_app.get("/api/list-memories")
+@mcp.app.get("/api/list-memories")
 async def list_memories():
     path = get_memory_path()
     if not os.path.exists(path): return []
     files = [f for f in os.listdir(path) if f.endswith(".md")]
     return sorted(files, reverse=True)
 
-@mcp.external_app.get("/api/read-memory")
+@mcp.app.get("/api/read-memory")
 async def read_memory(name: str):
     path = os.path.join(get_memory_path(), name)
     with open(path, "r", encoding="utf-8") as f:
         return {"content": f.read()}
 
-@mcp.external_app.post("/api/save-memory")
+@mcp.app.post("/api/save-memory")
 async def save_memory(request: Request):
     data = await request.json()
     path = os.path.join(get_memory_path(), data['name'])
