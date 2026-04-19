@@ -1071,12 +1071,32 @@ if __name__ == "__main__":
         # --- 新增：一键打包功能 ---
         @full_web_app.get("/api/backup-all")
         async def backup_all():
-            path = get_memory_path()
             temp_dir = tempfile.gettempdir()
-            zip_path = os.path.join(temp_dir, "leo_lumi_memories")
-            # 把整个保险柜打包成 ZIP
-            shutil.make_archive(zip_path, 'zip', path)
-            return FileResponse(zip_path + ".zip", filename="leo_lumi_memories.zip")
+            rescue_dir = os.path.join(temp_dir, "leo_rescue_station")
+            if os.path.exists(rescue_dir):
+                shutil.rmtree(rescue_dir)
+            os.makedirs(rescue_dir)
+
+            # 1. 搜救范围 A：咱们的保险柜路径
+            bucket_path = get_memory_path()
+            if os.path.exists(bucket_path):
+                shutil.copytree(bucket_path, os.path.join(rescue_dir, "from_bucket"), dirs_exist_ok=True)
+
+            # 2. 搜救范围 B：全盘深挖 (防止 Railway 挂载错地方)
+            # 咱们找遍整个 /app 文件夹，把所有 .md 结尾的东西都偷回来
+            count = 0
+            for root, dirs, files in os.walk("/app"):
+                for f in files:
+                    if f.endswith(".md"):
+                        src = os.path.join(root, f)
+                        dst = os.path.join(rescue_dir, f"found_{count}_{f}")
+                        shutil.copy2(src, dst)
+                        count += 1
+
+            # 打包这个“救助站”
+            zip_path = os.path.join(temp_dir, "leo_lumi_FINAL_RESCUE")
+            shutil.make_archive(zip_path, 'zip', rescue_dir)
+            return FileResponse(zip_path + ".zip", filename="HEARTBEAT_BACKUP.zip")
 
         @full_web_app.get("/api/list-memories")
         async def list_memories():
