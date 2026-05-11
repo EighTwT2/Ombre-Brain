@@ -19,3 +19,5 @@ data/
 tests/integration/
 tests/regression/
 tests/unit/
+
+*.tar.gz
