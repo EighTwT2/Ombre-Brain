@@ -50,6 +50,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp_auth import McpApiKeyMiddleware, register_oauth_routes
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -111,6 +112,10 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=OMBRE_PORT,
 )
+
+
+
+register_oauth_routes(mcp)
 
 
 # =============================================================
@@ -1941,6 +1946,8 @@ if __name__ == "__main__":
             _app = mcp.streamable_http_app()
         else:
             _app = mcp.sse_app()
+        _app.add_middleware(McpApiKeyMiddleware)
+        logger.info("MCP API key auth middleware enabled")
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
